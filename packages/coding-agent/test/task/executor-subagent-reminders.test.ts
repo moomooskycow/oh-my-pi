@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { AgentBusyError, type AgentTelemetryConfig, type Tracer } from "@oh-my-pi/pi-agent-core";
+import { AgentBusyError, type AgentTelemetryConfig, PiGenAIAttr, type Tracer } from "@oh-my-pi/pi-agent-core";
 import { type AssistantMessage, Effort } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionActions, LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -819,16 +819,18 @@ describe("runSubprocess telemetry propagation", () => {
 		const createAgentSessionSpy = mockCreateAgentSession(buildSession());
 		const onSpanStart = () => {};
 		const onSpanEnd = () => {};
+		const resolveAttributes = () => ({ "request.id": "child" });
 		const costEstimator = () => undefined;
 		const tracer = { startSpan: () => undefined } as unknown as Tracer;
 		const parentTelemetry: AgentTelemetryConfig = {
 			tracer,
 			captureMessageContent: true,
-			attributes: { "deployment.id": "prod" },
+			attributes: { "deployment.id": "prod", [PiGenAIAttr.AgentKind]: "primary" },
 			agent: { id: "0-Main", name: "main", description: "primary agent" },
 			conversationId: "parent-conversation",
 			onSpanStart,
 			onSpanEnd,
+			resolveAttributes,
 			costEstimator,
 		};
 
@@ -840,10 +842,11 @@ describe("runSubprocess telemetry propagation", () => {
 		if (!forwarded) throw new Error("expected telemetry on createAgentSession call");
 		expect(forwarded.tracer).toBe(tracer);
 		expect(forwarded.captureMessageContent).toBe(true);
-		expect(forwarded.attributes).toEqual({ "deployment.id": "prod" });
+		expect(forwarded.attributes).toEqual({ "deployment.id": "prod", [PiGenAIAttr.AgentKind]: "subagent" });
 		expect(forwarded.onSpanStart).toBe(onSpanStart);
 		expect(forwarded.onSpanEnd).toBe(onSpanEnd);
 		expect(forwarded.costEstimator).toBe(costEstimator);
+		expect(forwarded.resolveAttributes).toBe(resolveAttributes);
 		expect(forwarded.agent).toEqual({
 			id: "subagent-telemetry-derive",
 			name: baseAgent.name,

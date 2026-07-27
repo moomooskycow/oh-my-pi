@@ -1,6 +1,7 @@
 import { rm } from "node:fs/promises";
 import * as path from "node:path";
-import { type ApiKeyResolver, completeSimple } from "@oh-my-pi/pi-ai";
+import { type AgentTelemetry, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { ApiKeyResolver } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
@@ -102,7 +103,8 @@ export const mnemopiBackend: MemoryBackend = {
 		}
 
 		try {
-			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
+			const telemetry = resolveTelemetry(session.agent?.telemetry, sessionId);
+			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId, telemetry);
 			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			await installMnemopiState(session, config);
 		} catch (error) {
@@ -153,11 +155,14 @@ export const mnemopiBackend: MemoryBackend = {
 		try {
 			let state = getMnemopiSessionState(session);
 			if (!state && session?.sessionId) {
+				const sessionId = session.sessionId;
+				const telemetry = resolveTelemetry(session.agent?.telemetry, sessionId);
 				const config = await loadMnemopiConfigWithProviders(
 					session.settings,
 					agentDir,
 					session.modelRegistry,
-					session.sessionId,
+					sessionId,
+					telemetry,
 				);
 				await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 				state = await installMnemopiState(session, config);
@@ -454,9 +459,10 @@ async function loadMnemopiConfigWithProviders(
 	agentDir: string,
 	modelRegistry: ModelRegistry,
 	sessionId: string,
+	telemetry?: AgentTelemetry,
 ): Promise<MnemopiBackendConfig> {
 	const config = loadMnemopiConfig(settings, agentDir);
-	config.providerOptions = await resolveMnemopiProviderOptions(config, settings, modelRegistry, sessionId);
+	config.providerOptions = await resolveMnemopiProviderOptions(config, settings, modelRegistry, sessionId, telemetry);
 	return config;
 }
 
@@ -484,6 +490,7 @@ async function resolveMnemopiProviderOptions(
 	settings: MemoryBackendStartOptions["settings"],
 	modelRegistry: ModelRegistry,
 	sessionId: string,
+	telemetry?: AgentTelemetry,
 ): Promise<MnemopiProviderOptions> {
 	const base: MnemopiProviderOptions = {
 		noEmbeddings: config.providerOptions.noEmbeddings,
@@ -545,7 +552,7 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
-				const message = await completeSimple(
+				const message = await instrumentedCompleteSimple(
 					model,
 					{
 						messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
@@ -555,6 +562,7 @@ async function resolveMnemopiProviderOptions(
 						maxTokens: opts?.maxTokens,
 						temperature: opts?.temperature,
 					},
+					{ telemetry, oneshotKind: "mnemopi_llm" },
 				);
 				return message.content
 					.filter(

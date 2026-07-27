@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi 
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type ChatUsageEvent, PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/memories";
 import * as memoryStorage from "@oh-my-pi/pi-coding-agent/memories/storage";
 import { getAgentDbPath, Snowflake, TempDir } from "@oh-my-pi/pi-utils";
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 
 interface SessionFixture {
 	agentDir: string;
@@ -233,8 +235,22 @@ describe("memories runtime", () => {
 						}),
 					},
 				],
+				usage: { input: 20, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 30 },
 			} as any);
 
+		const exporter = new InMemorySpanExporter();
+		const tracerProvider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		const usageEvents: Array<{ conversationId: string | undefined }> = [];
+		fx.session.sessionId = "memory-runtime-session";
+		fx.session.agent = {
+			metadataForProvider: () => undefined,
+			telemetry: {
+				tracer: tracerProvider.getTracer("memory-runtime-test"),
+				onChatUsage: (event: ChatUsageEvent) => usageEvents.push({ conversationId: event.conversationId }),
+			},
+		};
 		startMemoryStartupTask({
 			session: fx.session,
 			settings: fx.settings,
@@ -259,6 +275,16 @@ describe("memories runtime", () => {
 		expect(ai.completeSimple).toHaveBeenCalledTimes(2);
 		const phase2Prompt = completeSpy.mock.calls[1]?.[1];
 		expect(phase2Prompt?.systemPrompt?.[0]).toContain("memory-stage-two consolidator");
+		expect(usageEvents).toHaveLength(2);
+		expect(usageEvents.every(event => event.conversationId === "memory-runtime-session")).toBe(true);
+		const chatSpans = exporter
+			.getFinishedSpans()
+			.filter(span => span.attributes[PiGenAIAttr.OneshotKind] !== undefined);
+		expect(chatSpans.map(span => span.attributes[PiGenAIAttr.OneshotKind])).toEqual([
+			"memory_stage1",
+			"memory_consolidation",
+		]);
+		await tracerProvider.shutdown();
 	});
 
 	test("clamps stage1 and phase2 reasoning effort against the model's supported range", async () => {

@@ -11,6 +11,7 @@ import type {
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	ChatUsageEvent,
 	ThinkingLevel,
 	ToolApproval,
 	ToolLoadMode,
@@ -666,6 +667,17 @@ export interface MessageEndEvent {
 	message: AgentMessage;
 }
 
+/**
+ * Fired once for every provider chat step that produced usage.
+ *
+ * The payload is the canonical {@link ChatUsageEvent} from pi-agent-core;
+ * extensions receive this event without enabling OpenTelemetry export.
+ */
+export interface ChatUsageExtensionEvent {
+	type: "chat_usage";
+	usage: ChatUsageEvent;
+}
+
 /** Fired when a tool starts executing */
 export interface ToolExecutionStartEvent {
 	type: "tool_execution_start";
@@ -918,6 +930,7 @@ export type ExtensionEvent =
 	| SessionEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
+	| ChatUsageExtensionEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
@@ -1107,6 +1120,7 @@ export interface ExtensionAPI {
 	on(event: "message_start", handler: ExtensionHandler<MessageStartEvent>): void;
 	on(event: "message_update", handler: ExtensionHandler<MessageUpdateEvent>): void;
 	on(event: "message_end", handler: ExtensionHandler<MessageEndEvent>): void;
+	on(event: "chat_usage", handler: ExtensionHandler<ChatUsageExtensionEvent>): void;
 	on(event: "tool_execution_start", handler: ExtensionHandler<ToolExecutionStartEvent>): void;
 	on(event: "tool_execution_update", handler: ExtensionHandler<ToolExecutionUpdateEvent>): void;
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;

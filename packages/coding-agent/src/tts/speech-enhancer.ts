@@ -15,7 +15,8 @@
  *   mechanical {@link SpeakableStream} cleanup — speech never blocks on the
  *   model.
  */
-import { type AssistantMessage, completeSimple } from "@oh-my-pi/pi-ai";
+import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, completeSimple } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
@@ -40,6 +41,8 @@ export interface SpeechEnhancerDeps {
 	registry: ModelRegistry;
 	sessionId: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
+	telemetryConfig?: AgentTelemetryConfig;
+	completeImpl?: typeof completeSimple;
 }
 
 function extractText(content: AssistantMessage["content"]): string {
@@ -83,7 +86,8 @@ export class SpeechEnhancer {
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
 			const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
-			const response = await completeSimple(
+			const telemetry = resolveTelemetry(this.#deps.telemetryConfig, sessionId);
+			const response = await instrumentedCompleteSimple(
 				model,
 				{
 					systemPrompt: [SYSTEM_PROMPT],
@@ -95,6 +99,11 @@ export class SpeechEnhancer {
 					disableReasoning: true,
 					metadata,
 					signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+				},
+				{
+					telemetry,
+					oneshotKind: "speech_rewrite",
+					completeImpl: this.#deps.completeImpl,
 				},
 			);
 			if (response.stopReason === "error") {

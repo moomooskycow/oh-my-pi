@@ -1,12 +1,35 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
+import type * as ai from "@oh-my-pi/pi-ai";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
 	classifyUnexpectedStop,
 	isUnexpectedStopCandidate,
 	parseUnexpectedStopClassification,
 } from "@oh-my-pi/pi-coding-agent/session/unexpected-stop-classifier";
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+
+function makeTelemetryProbe() {
+	const exporter = new InMemorySpanExporter();
+	const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+	const onChatUsage = vi.fn();
+	return {
+		exporter,
+		onChatUsage,
+		telemetry: { tracer: provider.getTracer("unexpected-stop-classifier-tests"), onChatUsage },
+	};
+}
+
+function makeCompletion(text: string) {
+	return {
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		content: [{ type: "text", text }],
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+	} as never;
+}
 
 function makeAssistantMessage(options: {
 	stopReason: AssistantMessage["stopReason"];
@@ -100,15 +123,15 @@ describe("classifyUnexpectedStop", () => {
 			getApiKey: async () => "test-key",
 			resolver: () => async () => "test-key",
 		} as never;
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "YES" }],
-		} as never);
+		const completeSimpleMock = vi.fn(async (..._args: Parameters<typeof ai.completeSimple>) => makeCompletion("YES"));
+		const probe = makeTelemetryProbe();
 
 		const result = await classifyUnexpectedStop("I will continue with the next command.", {
 			settings,
 			registry,
 			sessionId: "session-1",
+			telemetryConfig: probe.telemetry,
+			completeImpl: completeSimpleMock as unknown as typeof ai.completeSimple,
 		});
 		const options = completeSimpleMock.mock.calls[0]?.[2] as
 			| { disableReasoning?: boolean; maxTokens?: number }
@@ -116,6 +139,10 @@ describe("classifyUnexpectedStop", () => {
 
 		expect(result).toBe(true);
 		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1024 });
+		const spans = probe.exporter.getFinishedSpans();
+		expect(probe.onChatUsage).toHaveBeenCalledTimes(1);
+		expect(spans).toHaveLength(1);
+		expect(spans[0]?.attributes[PiGenAIAttr.OneshotKind]).toBe("unexpected_stop_classifier");
 	});
 });
 

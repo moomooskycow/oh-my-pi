@@ -13,9 +13,9 @@
  * Throws on any failure (no model, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
  */
-import { type AssistantMessage, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { type AssistantMessage, type completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
-
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -46,6 +46,8 @@ const REASONING_SAFE_MAX_TOKENS = 1024;
 export interface ClassifyDifficultyDeps {
 	settings: Settings;
 	registry: ModelRegistry;
+	telemetryConfig?: AgentTelemetryConfig;
+	completeImpl?: typeof completeSimple;
 	model: Model;
 	sessionId?: string;
 	signal?: AbortSignal;
@@ -85,7 +87,8 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps): Prom
 	const metadata = deps.metadataResolver?.(model.provider);
 	const maxTokens = REASONING_SAFE_MAX_TOKENS;
 
-	const response = await completeSimple(
+	const telemetry = resolveTelemetry(deps.telemetryConfig, deps.sessionId);
+	const response = await instrumentedCompleteSimple(
 		model,
 		{
 			systemPrompt: [DIFFICULTY_SYSTEM_PROMPT],
@@ -97,6 +100,11 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps): Prom
 			disableReasoning: true,
 			metadata,
 			signal: deps.signal,
+		},
+		{
+			telemetry,
+			oneshotKind: "auto_thinking_classifier",
+			completeImpl: deps.completeImpl,
 		},
 	);
 

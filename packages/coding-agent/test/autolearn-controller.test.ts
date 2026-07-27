@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { Agent, type AgentMessage, type AgentOptions, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import {
+	Agent,
+	type AgentMessage,
+	type AgentOptions,
+	type AgentTelemetryConfig,
+	type AgentTool,
+	PiGenAIAttr,
+} from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, FetchImpl, Model, ProviderSessionState, Usage } from "@oh-my-pi/pi-ai";
 import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -473,6 +480,64 @@ describe("isolated auto-learn capture", () => {
 		expect(captureMock.calls).toHaveLength(1);
 		expect(captureOnPayload).toBe(onPayload);
 		expect(captureOnResponse).toBe(onResponse);
+	});
+
+	it("derives parent telemetry for the detached capture with a stable child identity", async () => {
+		const captureMock = createMockModel({ responses: [{ content: ["Captured."] }] });
+		const manageSkillTool = captureTool("manage_skill", "Manage reusable skills");
+		const onChatUsage = () => {};
+		const onSpanStart = () => {};
+		const onSpanEnd = () => {};
+		const resolveAttributes = () => ({ "request.id": "capture" });
+		const costEstimator = () => undefined;
+		const parentTelemetry: AgentTelemetryConfig = {
+			attributes: { "deployment.id": "prod", [PiGenAIAttr.AgentKind]: "primary" },
+			agent: { id: "parent-session", name: "main" },
+			conversationId: "parent-conversation",
+			onChatUsage,
+			onSpanStart,
+			onSpanEnd,
+			resolveAttributes,
+			costEstimator,
+		};
+		const sourceAgent = new Agent({
+			sessionId: "parent-session",
+			initialState: { model: captureMock, systemPrompt: ["Test"], tools: [manageSkillTool] },
+		});
+		let captureTelemetry: AgentTelemetryConfig | undefined;
+		const runCapture = createAutoLearnCaptureRunner({
+			sourceAgent,
+			captureTools: [manageSkillTool],
+			parentTelemetry,
+			createSessionId: () => "capture-session",
+			createAgent: options => {
+				captureTelemetry = options.telemetry;
+				return new Agent({
+					...options,
+					convertToLlm,
+					streamFn: captureMock.stream,
+				});
+			},
+		});
+
+		await runCapture("Capture telemetry");
+
+		expect(captureTelemetry).toBeDefined();
+		if (!captureTelemetry) throw new Error("Expected capture telemetry");
+		expect(captureTelemetry.onChatUsage).toBe(onChatUsage);
+		expect(captureTelemetry.onSpanStart).toBe(onSpanStart);
+		expect(captureTelemetry.onSpanEnd).toBe(onSpanEnd);
+		expect(captureTelemetry.resolveAttributes).toBe(resolveAttributes);
+		expect(captureTelemetry.costEstimator).toBe(costEstimator);
+		expect(captureTelemetry.attributes).toEqual({
+			"deployment.id": "prod",
+			[PiGenAIAttr.AgentKind]: "subagent",
+		});
+		expect(captureTelemetry.agent).toEqual({
+			id: "parent-session-auto-learn",
+			name: "auto-learn",
+		});
+		expect(captureTelemetry.conversationId).toBeUndefined();
 	});
 
 	it("adds learn alongside manage_skill when a memory backend provides it", async () => {
