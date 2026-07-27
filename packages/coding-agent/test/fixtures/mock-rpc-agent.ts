@@ -68,6 +68,21 @@ for await (const raw of console) {
 			}
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
 			const id = typeof frame.id === "string" ? frame.id : undefined;
+			if (frame.type === "mock_report_environment") {
+				writeFrame({
+					id,
+					type: "response",
+					command: frame.type,
+					success: true,
+					data: {
+						parentOnlyMarker: Bun.env.MOCK_RPC_PARENT_ONLY_MARKER ?? null,
+						secondParentOnlyMarker: Bun.env.MOCK_RPC_SECOND_PARENT_MARKER ?? null,
+						overlayMarker: Bun.env.MOCK_RPC_OVERLAY_MARKER ?? null,
+						suppliedMarker: Bun.env.MOCK_RPC_SUPPLIED_MARKER ?? null,
+					},
+				});
+				continue;
+			}
 			if (frame.type === "negotiate_protocol" && frame.protocolVersion === 2) {
 				writeFrame({
 					id,

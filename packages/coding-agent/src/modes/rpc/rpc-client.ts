@@ -46,6 +46,9 @@ type DistributiveOmit<T, K extends keyof T> = T extends unknown ? Omit<T, K> : n
 
 /** RpcCommand without the id field (for internal send) */
 type RpcCommandBody = DistributiveOmit<RpcCommand, "id">;
+type RpcTestCommand = { type: string; [key: string]: unknown };
+
+export type RpcEnvMode = "merge" | "replace";
 
 export interface RpcClientOptions {
 	/** Path to the CLI entry point (default: searches for dist/cli.js) */
@@ -54,6 +57,8 @@ export interface RpcClientOptions {
 	cwd?: string;
 	/** Environment variables */
 	env?: Record<string, string>;
+	/** Whether to inherit the parent environment or replace it (default: merge) */
+	envMode?: RpcEnvMode;
 	/** Provider to use */
 	provider?: string;
 	/** Model ID to use */
@@ -64,6 +69,20 @@ export interface RpcClientOptions {
 	args?: string[];
 	/** Custom tools owned by the embedding host and exposed over the RPC transport */
 	customTools?: RpcClientCustomTool[];
+}
+
+export function resolveRpcChildEnv(
+	options: Pick<RpcClientOptions, "env" | "envMode">,
+	parentEnv: Record<string, string | undefined> = Bun.env,
+): Record<string, string> {
+	const resolved: Record<string, string> = {};
+	if (options.envMode !== "replace") {
+		for (const [key, value] of Object.entries(parentEnv)) {
+			if (value !== undefined) resolved[key] = value;
+		}
+	}
+	if (options.env) Object.assign(resolved, options.env);
+	return resolved;
 }
 
 export type ModelInfo = Pick<Model, "provider" | "id" | "contextWindow" | "reasoning" | "thinking">;
@@ -244,6 +263,7 @@ function isPageFallbackError(error: unknown): boolean {
 export class RpcClient {
 	#process: ptree.ChildProcess | null = null;
 	#reaping: Promise<void> | null = null;
+	#startInFlight = false;
 	#eventListeners: RpcEventListener[] = [];
 	#sessionEventListeners: RpcSessionEventListener[] = [];
 	#subagentLifecycleListeners = new Set<RpcSubagentLifecycleListener>();
@@ -272,162 +292,170 @@ export class RpcClient {
 	 * retry without leaking processes.
 	 */
 	async start(): Promise<void> {
-		await this.#reaping;
-		if (this.#process) {
+		if (this.#process || this.#startInFlight) {
 			throw new Error("Client already started");
 		}
+		this.#startInFlight = true;
+		try {
+			await this.#reaping;
+			if (this.#process) {
+				throw new Error("Client already started");
+			}
 
-		// Mint a fresh controller so a previous stop()'s abort does not
-		// short-circuit the new stdout reader (issue #4079).
-		this.#abortController = new AbortController();
-		this.#protocolVersion = 1;
+			// Mint a fresh controller so a previous stop()'s abort does not
+			// short-circuit the new stdout reader (issue #4079).
+			this.#abortController = new AbortController();
+			this.#protocolVersion = 1;
 
-		const cliPath = this.options.cliPath ?? "dist/cli.js";
-		const args = ["--mode", "rpc"];
+			const cliPath = this.options.cliPath ?? "dist/cli.js";
+			const args = ["--mode", "rpc"];
 
-		if (this.options.provider) {
-			args.push("--provider", this.options.provider);
-		}
-		if (this.options.model) {
-			args.push("--model", this.options.model);
-		}
-		if (this.options.sessionDir) {
-			args.push("--session-dir", this.options.sessionDir);
-		}
-		if (this.options.args) {
-			args.push(...this.options.args);
-		}
+			if (this.options.provider) {
+				args.push("--provider", this.options.provider);
+			}
+			if (this.options.model) {
+				args.push("--model", this.options.model);
+			}
+			if (this.options.sessionDir) {
+				args.push("--session-dir", this.options.sessionDir);
+			}
+			if (this.options.args) {
+				args.push(...this.options.args);
+			}
 
-		const child = ptree.spawn(["bun", cliPath, ...args], {
-			cwd: this.options.cwd,
-			env: { ...Bun.env, ...this.options.env },
-			stdin: "pipe",
-		});
-		this.#process = child;
+			const child = ptree.spawn([process.execPath, cliPath, ...args], {
+				cwd: this.options.cwd,
+				env: resolveRpcChildEnv(this.options),
+				stdin: "pipe",
+			});
+			this.#process = child;
 
-		// Wait for the "ready" signal or process exit
-		const { promise: readyPromise, resolve: readyResolve, reject: readyReject } = Promise.withResolvers<void>();
-		let readySettled = false;
-		let protocolV2Supported = false;
-		let protocolV2Enabled = false;
-		const frameDecoder = new RpcFrameDecoder();
+			// Wait for the "ready" signal or process exit
+			const { promise: readyPromise, resolve: readyResolve, reject: readyReject } = Promise.withResolvers<void>();
+			let readySettled = false;
+			let protocolV2Supported = false;
+			let protocolV2Enabled = false;
+			const frameDecoder = new RpcFrameDecoder();
 
-		const reapAfterOutputFailure = async (error: Error) => {
-			if (this.#process !== child) return;
+			const reapAfterOutputFailure = async (error: Error) => {
+				if (this.#process !== child) return;
 
-			this.#process = null;
-			this.#abortController.abort(error);
-			const pendingRequests = Array.from(this.#pendingRequests.values());
-			this.#pendingRequests.clear();
-			for (const pendingCall of this.#pendingHostToolCalls.values()) pendingCall.controller.abort(error);
-			this.#pendingHostToolCalls.clear();
+				this.#process = null;
+				this.#abortController.abort(error);
+				const pendingRequests = Array.from(this.#pendingRequests.values());
+				this.#pendingRequests.clear();
+				for (const pendingCall of this.#pendingHostToolCalls.values()) pendingCall.controller.abort(error);
+				this.#pendingHostToolCalls.clear();
+
+				try {
+					child.kill();
+				} catch {
+					// The process may already have exited.
+				}
+				await this.#waitForExit(child);
+				for (const request of pendingRequests) request.reject(error);
+			};
+
+			// Process lines in background, intercepting the ready signal.
+			const lines = readJsonl(child.stdout, this.#abortController.signal);
+			void (async () => {
+				for await (const line of lines) {
+					if (!readySettled && isRecord(line) && line.type === "ready") {
+						protocolV2Supported = supportsRpcProtocolV2(line);
+						readySettled = true;
+						readyResolve();
+						continue;
+					}
+					if (isRecord(line) && line.type === "rpc_chunk" && !protocolV2Enabled)
+						throw new Error("RPC chunk received before protocol negotiation");
+					const decoded = frameDecoder.push(line);
+					if (decoded) this.#handleLine(decoded);
+				}
+				// A closed stdout is terminal even if the child remains alive. Startup
+				// failures are reaped by the readyPromise catch below; established
+				// workers are reaped here so pending requests cannot hang indefinitely.
+				if (!readySettled) {
+					readySettled = true;
+					readyReject(new Error(`Agent output stream ended before ready. Stderr: ${child.peekStderr()}`));
+					return;
+				}
+				const exitResult = await Promise.race([
+					child.exited.then(
+						exitCode => ({ exitCode }),
+						cause => ({ cause }),
+					),
+					Bun.sleep(100).then(() => null),
+				]);
+				const error =
+					exitResult === null
+						? new Error(`Agent output stream ended unexpectedly. Stderr: ${child.peekStderr()}`)
+						: "exitCode" in exitResult
+							? new Error(`Agent process exited with code ${exitResult.exitCode}. Stderr: ${child.peekStderr()}`)
+							: new Error(`Agent output stream ended. Stderr: ${child.peekStderr()}`, {
+									cause: exitResult.cause,
+								});
+				await reapAfterOutputFailure(error);
+			})().catch(async (cause: unknown) => {
+				const error = cause instanceof Error ? cause : new Error(String(cause));
+				if (!readySettled) {
+					readySettled = true;
+					readyReject(error);
+					return;
+				}
+				await reapAfterOutputFailure(new Error(`Agent output reader failed: ${error.message}`, { cause: error }));
+			});
+
+			// Also race against process exit (in case stdout closes before we read it)
+			void child.exited.then(
+				(exitCode: number) => {
+					if (readySettled) return;
+					readySettled = true;
+					readyReject(new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`));
+				},
+				(err: Error) => {
+					// Killed or reaped without an exit code (e.g. stop() during
+					// startup); surface it instead of leaking an unhandled rejection.
+					if (readySettled) return;
+					readySettled = true;
+					readyReject(new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`, { cause: err }));
+				},
+			);
+
+			// Timeout to prevent hanging forever
+			const readyTimeout = this.#startTimeout(30000, () => {
+				if (readySettled) return;
+				readySettled = true;
+				readyReject(new Error(`Timeout waiting for agent to become ready. Stderr: ${child.peekStderr()}`));
+			});
 
 			try {
-				child.kill();
-			} catch {
-				// The process may already have exited.
-			}
-			await this.#waitForExit(child);
-			for (const request of pendingRequests) request.reject(error);
-		};
-
-		// Process lines in background, intercepting the ready signal.
-		const lines = readJsonl(child.stdout, this.#abortController.signal);
-		void (async () => {
-			for await (const line of lines) {
-				if (!readySettled && isRecord(line) && line.type === "ready") {
-					protocolV2Supported = supportsRpcProtocolV2(line);
-					readySettled = true;
-					readyResolve();
-					continue;
+				await readyPromise;
+				if (protocolV2Supported) {
+					protocolV2Enabled = true;
+					const response = await this.#send({ type: "negotiate_protocol", protocolVersion: 2 });
+					if (
+						!response.success ||
+						response.command !== "negotiate_protocol" ||
+						!isRecord(response.data) ||
+						response.data.protocolVersion !== 2
+					)
+						throw new Error("RPC protocol v2 negotiation failed");
+					this.#protocolVersion = 2;
 				}
-				if (isRecord(line) && line.type === "rpc_chunk" && !protocolV2Enabled)
-					throw new Error("RPC chunk received before protocol negotiation");
-				const decoded = frameDecoder.push(line);
-				if (decoded) this.#handleLine(decoded);
+				if (this.#customTools.length > 0) {
+					await this.setCustomTools(this.#customTools);
+				}
+			} catch (cause) {
+				// Startup failed after spawning the child. Reap it before returning
+				// so a retry cannot inherit a live worker or its session lock.
+				const error = cause instanceof Error ? cause : new Error(String(cause));
+				await reapAfterOutputFailure(error);
+				throw cause;
+			} finally {
+				clearTimeout(readyTimeout);
 			}
-			// A closed stdout is terminal even if the child remains alive. Startup
-			// failures are reaped by the readyPromise catch below; established
-			// workers are reaped here so pending requests cannot hang indefinitely.
-			if (!readySettled) {
-				readySettled = true;
-				readyReject(new Error(`Agent output stream ended before ready. Stderr: ${child.peekStderr()}`));
-				return;
-			}
-			const exitResult = await Promise.race([
-				child.exited.then(
-					exitCode => ({ exitCode }),
-					cause => ({ cause }),
-				),
-				Bun.sleep(100).then(() => null),
-			]);
-			const error =
-				exitResult === null
-					? new Error(`Agent output stream ended unexpectedly. Stderr: ${child.peekStderr()}`)
-					: "exitCode" in exitResult
-						? new Error(`Agent process exited with code ${exitResult.exitCode}. Stderr: ${child.peekStderr()}`)
-						: new Error(`Agent output stream ended. Stderr: ${child.peekStderr()}`, {
-								cause: exitResult.cause,
-							});
-			await reapAfterOutputFailure(error);
-		})().catch(async (cause: unknown) => {
-			const error = cause instanceof Error ? cause : new Error(String(cause));
-			if (!readySettled) {
-				readySettled = true;
-				readyReject(error);
-				return;
-			}
-			await reapAfterOutputFailure(new Error(`Agent output reader failed: ${error.message}`, { cause: error }));
-		});
-
-		// Also race against process exit (in case stdout closes before we read it)
-		void child.exited.then(
-			(exitCode: number) => {
-				if (readySettled) return;
-				readySettled = true;
-				readyReject(new Error(`Agent process exited with code ${exitCode}. Stderr: ${child.peekStderr()}`));
-			},
-			(err: Error) => {
-				// Killed or reaped without an exit code (e.g. stop() during
-				// startup); surface it instead of leaking an unhandled rejection.
-				if (readySettled) return;
-				readySettled = true;
-				readyReject(new Error(`Agent process exited before ready. Stderr: ${child.peekStderr()}`, { cause: err }));
-			},
-		);
-
-		// Timeout to prevent hanging forever
-		const readyTimeout = this.#startTimeout(30000, () => {
-			if (readySettled) return;
-			readySettled = true;
-			readyReject(new Error(`Timeout waiting for agent to become ready. Stderr: ${child.peekStderr()}`));
-		});
-
-		try {
-			await readyPromise;
-			if (protocolV2Supported) {
-				protocolV2Enabled = true;
-				const response = await this.#send({ type: "negotiate_protocol", protocolVersion: 2 });
-				if (
-					!response.success ||
-					response.command !== "negotiate_protocol" ||
-					!isRecord(response.data) ||
-					response.data.protocolVersion !== 2
-				)
-					throw new Error("RPC protocol v2 negotiation failed");
-				this.#protocolVersion = 2;
-			}
-			if (this.#customTools.length > 0) {
-				await this.setCustomTools(this.#customTools);
-			}
-		} catch (cause) {
-			// Startup failed after spawning the child. Reap it before returning
-			// so a retry cannot inherit a live worker or its session lock.
-			const error = cause instanceof Error ? cause : new Error(String(cause));
-			await reapAfterOutputFailure(error);
-			throw cause;
 		} finally {
-			clearTimeout(readyTimeout);
+			this.#startInFlight = false;
 		}
 	}
 
@@ -598,6 +626,12 @@ export class RpcClient {
 	async getState(): Promise<RpcSessionState> {
 		const response = await this.#send({ type: "get_state" });
 		return this.#getData(response);
+	}
+
+	/** @internal Test-only transport hook for fixture-specific RPC commands. */
+	async sendForTests<T>(command: RpcTestCommand): Promise<T> {
+		const response = await this.#send(command);
+		return this.#getData<T>(response);
 	}
 
 	/**
@@ -1067,7 +1101,7 @@ export class RpcClient {
 		}
 	}
 
-	#send(command: RpcCommandBody, timeoutMs = 30_000): Promise<RpcResponse> {
+	#send(command: RpcCommandBody | RpcTestCommand, timeoutMs = 30_000): Promise<RpcResponse> {
 		if (!this.#process?.stdin) {
 			throw new Error("Client not started");
 		}

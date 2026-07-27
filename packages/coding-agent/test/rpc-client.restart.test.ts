@@ -5,6 +5,13 @@ import { ptree, TempDir } from "@oh-my-pi/pi-utils";
 
 const MOCK_AGENT = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
 
+interface MockEnvironmentReport {
+	parentOnlyMarker: string | null;
+	secondParentOnlyMarker: string | null;
+	overlayMarker: string | null;
+	suppliedMarker: string | null;
+}
+
 function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -15,6 +22,95 @@ function isProcessAlive(pid: number): boolean {
 }
 
 describe("RpcClient lifecycle (issue #4079 B)", () => {
+	test("supports inherited and replacement child environments", async () => {
+		const parentEnv = {
+			MOCK_RPC_PARENT_ONLY_MARKER: "parent-only-marker",
+			MOCK_RPC_SECOND_PARENT_MARKER: "second-parent-only-marker",
+			MOCK_RPC_OVERLAY_MARKER: "parent-overlay-marker",
+		};
+		const previousParentEnv = {
+			MOCK_RPC_PARENT_ONLY_MARKER: process.env.MOCK_RPC_PARENT_ONLY_MARKER,
+			MOCK_RPC_SECOND_PARENT_MARKER: process.env.MOCK_RPC_SECOND_PARENT_MARKER,
+			MOCK_RPC_OVERLAY_MARKER: process.env.MOCK_RPC_OVERLAY_MARKER,
+		};
+		Object.assign(process.env, parentEnv);
+		const suppliedEnv = {
+			MOCK_RPC_SUPPLIED_MARKER: "supplied-marker",
+			MOCK_RPC_OVERLAY_MARKER: "supplied-overlay-marker",
+		};
+
+		try {
+			// Omitted envMode defaults to merge: supplied values overlay inherited values, and merge cannot delete inherited keys.
+			using mergedClient = new RpcClient({ cliPath: MOCK_AGENT, env: suppliedEnv });
+			await mergedClient.start();
+			const mergedReport = await mergedClient.sendForTests<MockEnvironmentReport>({
+				type: "mock_report_environment",
+			});
+			expect(mergedReport).toEqual({
+				parentOnlyMarker: "parent-only-marker",
+				secondParentOnlyMarker: "second-parent-only-marker",
+				overlayMarker: "supplied-overlay-marker",
+				suppliedMarker: "supplied-marker",
+			});
+			await mergedClient.stop();
+
+			// Replace is the isolation mode: inherited parent markers are absent while supplied keys remain.
+			using replacedClient = new RpcClient({ cliPath: MOCK_AGENT, env: suppliedEnv, envMode: "replace" });
+			await replacedClient.start();
+			const replacedReport = await replacedClient.sendForTests<MockEnvironmentReport>({
+				type: "mock_report_environment",
+			});
+			expect(replacedReport).toEqual({
+				parentOnlyMarker: null,
+				secondParentOnlyMarker: null,
+				overlayMarker: "supplied-overlay-marker",
+				suppliedMarker: "supplied-marker",
+			});
+			await replacedClient.stop();
+
+			using emptyReplacedClient = new RpcClient({ cliPath: MOCK_AGENT, envMode: "replace" });
+			await emptyReplacedClient.start();
+			const emptyReport = await emptyReplacedClient.sendForTests<MockEnvironmentReport>({
+				type: "mock_report_environment",
+			});
+			expect(emptyReport).toEqual({
+				parentOnlyMarker: null,
+				secondParentOnlyMarker: null,
+				overlayMarker: null,
+				suppliedMarker: null,
+			});
+			await emptyReplacedClient.stop();
+		} finally {
+			if (previousParentEnv.MOCK_RPC_PARENT_ONLY_MARKER === undefined)
+				delete process.env.MOCK_RPC_PARENT_ONLY_MARKER;
+			else process.env.MOCK_RPC_PARENT_ONLY_MARKER = previousParentEnv.MOCK_RPC_PARENT_ONLY_MARKER;
+			if (previousParentEnv.MOCK_RPC_SECOND_PARENT_MARKER === undefined)
+				delete process.env.MOCK_RPC_SECOND_PARENT_MARKER;
+			else process.env.MOCK_RPC_SECOND_PARENT_MARKER = previousParentEnv.MOCK_RPC_SECOND_PARENT_MARKER;
+			if (previousParentEnv.MOCK_RPC_OVERLAY_MARKER === undefined) delete process.env.MOCK_RPC_OVERLAY_MARKER;
+			else process.env.MOCK_RPC_OVERLAY_MARKER = previousParentEnv.MOCK_RPC_OVERLAY_MARKER;
+		}
+	}, 20_000);
+
+	test("rejects overlapping starts and reaps the single child", async () => {
+		using tempDir = TempDir.createSync("@omp-rpc-overlapping-start-");
+		const pidFile = tempDir.join("pid");
+		using client = new RpcClient({
+			cliPath: MOCK_AGENT,
+			env: { MOCK_RPC_PID_FILE: pidFile },
+		});
+
+		const firstStart = client.start();
+		await expect(client.start()).rejects.toThrow("Client already started");
+		await firstStart;
+
+		const pid = Number(await Bun.file(pidFile).text());
+		expect(pid).toBeGreaterThan(0);
+		expect(isProcessAlive(pid)).toBe(true);
+		await client.stop();
+		expect(isProcessAlive(pid)).toBe(false);
+	}, 20_000);
+
 	test("auto-negotiates protocol v2 and reassembles an oversized response", async () => {
 		using client = new RpcClient({
 			cliPath: MOCK_AGENT,
