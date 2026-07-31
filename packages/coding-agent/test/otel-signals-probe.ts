@@ -145,12 +145,14 @@ logger.error("probe error", { code: "probe" });
 
 // Metric instruments via the agent telemetry hooks.
 const usage: ChatUsageEvent = {
+	eventId: "00000000-0000-4000-8000-000000000901",
 	span: undefined as never,
 	agent: { id: "main", name: "Main" },
 	conversationId: "probe-session",
 	stepNumber: 0,
 	model: "claude-haiku-4-5",
 	provider: "anthropic",
+	modelProvider: "anthropic",
 	serviceTier: undefined,
 	usage: {
 		inputTokens: 1000,
