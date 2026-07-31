@@ -1,0 +1,41 @@
+{
+  "actionable_findings": 1,
+  "bundle_digest": "sha256:4f273cd1b604eba8c62e2a3d1526aaae5f456d4748cdfac1072f828edfc94cfa",
+  "commits": [
+    "51e311faf54d3f6a6df56ba13b14deb25ebc5f87"
+  ],
+  "exit_code": 0,
+  "new_oid": "51e311faf54d3f6a6df56ba13b14deb25ebc5f87",
+  "old_oid": "222e3569bd45cdc5257f12d8d2d02626bbb7b120",
+  "paths": [
+    "packages/coding-agent/src/modes/rpc/rpc-client.ts",
+    "packages/coding-agent/test/fixtures/mock-rpc-agent.ts",
+    "packages/coding-agent/test/rpc-client.restart.test.ts"
+  ],
+  "raw_report": {
+    "findings": [
+      {
+        "description": "The added test \"supports inherited and replacement child environments\" calls Object.assign(process.env, parentEnv) and holds those globals for the full multi-client run (up to 20s). Repo test rules forbid file-wide process.env mutation when a narrower seam exists. This change also exports resolveRpcChildEnv(options, parentEnv) with an injectable parentEnv, so merge/replace semantics can be covered with a direct unit test of that helper and RpcClient integration cases that only pass options.env / envMode, avoiding parallel-suite pollution of MOCK_RPC_* variables.",
+        "file": "packages/coding-agent/test/rpc-client.restart.test.ts",
+        "id": "rpc-env-test-process-env-mutation",
+        "line": 36,
+        "severity": "P2",
+        "title": "New env-mode integration test mutates global process.env despite an injectable seam"
+      }
+    ]
+  },
+  "raw_report_path": ".omp/review-passes/thermo-nuclear-review.raw.json",
+  "repository": "/Users/phaedrus/Development/oh-my-pi",
+  "reviewer": "thermo-nuclear-review",
+  "schema": "omp.review-pass.v2",
+  "status": "findings",
+  "worker": {
+    "executable": "/Users/phaedrus/.local/share/cursor-agent/versions/2026.07.23-e383d2b/cursor-agent",
+    "executable_sha256": "sha256:eed61c5224668c9236334c4c68936a16aecc37374b592f59e31eb50433817831",
+    "harness": "cursor-agent",
+    "model": "composer-2.5",
+    "payload": "global/external/cursor-thermos",
+    "payload_sha256": "sha256:1ec51d7aacf27592bbcf5f474992733378588c4e4d949333de558184d22c5a09",
+    "principal": "thermo-nuclear-review"
+  }
+}

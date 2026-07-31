@@ -1,0 +1,33 @@
+{
+  "actionable_findings": 4,
+  "findings": [
+    {
+      "message": "The diff adds `RpcTestCommand`, widens `#send` to accept it, and exports `sendForTests()` on `RpcClient` solely so the env integration test can issue fixture-specific `mock_report_environment` frames. That leaks test harness concerns into the shipped client surface (`@internal` is documentation-only) and permanently complicates the transport layer for a problem that already has a cleaner seam: `resolveRpcChildEnv` is exported with an injectable `parentEnv` parameter, and the mock fixture already supports startup side channels like `MOCK_RPC_PID_FILE`.",
+      "path": "packages/coding-agent/src/modes/rpc/rpc-client.ts",
+      "severity": "blocker",
+      "suggestion": "Delete `sendForTests`, `RpcTestCommand`, and the `#send` union widening. Unit-test `resolveRpcChildEnv({ env, envMode }, parentEnv)` directly for merge/replace/overlay behavior. For the one spawn integration assertion, extend `mock-rpc-agent.ts` to write an env snapshot file at startup (same pattern as `MOCK_RPC_PID_FILE`) and read it from the test after `start()`.",
+      "title": "Test-only transport hook pollutes the production RpcClient API"
+    },
+    {
+      "message": "`RpcTestCommand` is `{ type: string; [key: string]: unknown }`, and `#send` still serializes via `const fullCommand = { ...command, id } as RpcCommand`. That reintroduces an untyped escape hatch at the exact boundary the `RpcCommand` discriminated union is meant to protect, making it easier for future callers to ship arbitrary frames without going through the real command model.",
+      "path": "packages/coding-agent/src/modes/rpc/rpc-client.ts",
+      "severity": "major",
+      "suggestion": "Keep `#send` strictly `RpcCommandBody`. If a test-only path is unavoidable, confine it to the test package (fixture helper or test subclass) rather than widening the production send signature and papering over it with a cast.",
+      "title": "Loose RpcTestCommand erodes the typed RPC command contract"
+    },
+    {
+      "message": "`#startInFlight` fixes a real race, but the implementation wraps the entire ~170-line `start()` body in another try/finally nest rather than extracting spawn/ready-wait into focused helpers. `rpc-client.ts` is now 1229 lines and was already past the 1k maintainability boundary before this change; the diff adds more indentation and state (`#startInFlight`, duplicate post-reaping `Client already started` check) to the busiest method in the file.",
+      "path": "packages/coding-agent/src/modes/rpc/rpc-client.ts",
+      "severity": "major",
+      "suggestion": "Extract spawn env resolution and child startup into a small module or private methods (e.g. `#spawnChild()`, `#waitForReady(child)`), and colocate the single-flight guard with that extracted entrypoint. Consider moving `resolveRpcChildEnv` to `rpc-client-env.ts` so env policy does not further bloat the client class file.",
+      "title": "Overlapping-start guard deepens an already monolithic start() instead of decomposing it"
+    },
+    {
+      "message": "The new env behavior is implemented as a pure exported helper (`resolveRpcChildEnv`), but there are no direct unit tests for it. Instead, the diff adds a 70+ line integration test that mutates global `process.env`, runs three full start/stop cycles, and depends on the production `sendForTests` hook plus a bespoke `mock_report_environment` command branch. That is heavy, slow, and couples env-policy coverage to RPC transport internals.",
+      "path": "packages/coding-agent/test/rpc-client.restart.test.ts",
+      "severity": "major",
+      "suggestion": "Add focused `resolveRpcChildEnv` tests with an explicit `parentEnv` fixture object (merge overlay, replace isolation, empty replace). Keep at most one thin integration test that proves the resolved env reaches a spawned child via a fixture startup snapshot file, not a widened client API.",
+      "title": "Env merge/replace logic is tested at the wrong abstraction level"
+    }
+  ]
+}

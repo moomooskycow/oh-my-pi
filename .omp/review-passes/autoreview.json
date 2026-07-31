@@ -1,0 +1,35 @@
+{
+  "actionable_findings": 0,
+  "bundle_digest": "sha256:4f273cd1b604eba8c62e2a3d1526aaae5f456d4748cdfac1072f828edfc94cfa",
+  "commits": [
+    "51e311faf54d3f6a6df56ba13b14deb25ebc5f87"
+  ],
+  "exit_code": 0,
+  "new_oid": "51e311faf54d3f6a6df56ba13b14deb25ebc5f87",
+  "old_oid": "222e3569bd45cdc5257f12d8d2d02626bbb7b120",
+  "paths": [
+    "packages/coding-agent/src/modes/rpc/rpc-client.ts",
+    "packages/coding-agent/test/fixtures/mock-rpc-agent.ts",
+    "packages/coding-agent/test/rpc-client.restart.test.ts"
+  ],
+  "raw_report": {
+    "findings": [],
+    "overall_confidence": 0.99,
+    "overall_correctness": "patch is correct",
+    "overall_explanation": "No P0 defects are demonstrated by the provided change bundle. The environment-mode handling, overlapping-start guard, child-process launch update, and associated fixture coverage do not introduce a catastrophic correctness or security issue at the required reporting threshold."
+  },
+  "raw_report_path": ".omp/review-passes/autoreview.raw.json",
+  "repository": "/Users/phaedrus/Development/oh-my-pi",
+  "reviewer": "autoreview",
+  "schema": "omp.review-pass.v2",
+  "status": "clean",
+  "worker": {
+    "executable": "global/external/openclaw-autoreview/scripts/autoreview",
+    "executable_sha256": "sha256:08baa0c33a9c2e29d49024c39693be15dcf78042b2ae6808da528dba2dd240c5",
+    "harness": "openclaw-autoreview",
+    "model": "codex",
+    "payload": "global/external/openclaw-autoreview",
+    "payload_sha256": "sha256:839857a2764cdbaf8007b5882fed4e2ab02638fc945f5141cd03297581798e36",
+    "principal": "autoreview"
+  }
+}
