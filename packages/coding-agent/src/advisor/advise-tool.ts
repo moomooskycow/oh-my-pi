@@ -6,6 +6,7 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 } from "@oh-my-pi/pi-agent-core";
+import { PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
 import { escapeXmlAttribute, escapeXmlText } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import adviseDescription from "../prompts/advisor/advise-tool.md" with { type: "text" };
@@ -158,7 +159,15 @@ export function deriveAdvisorTelemetry(
 	identity: AgentIdentity,
 ): AgentTelemetryConfig | undefined {
 	if (!primaryTelemetry) return undefined;
-	return { ...primaryTelemetry, agent: identity, conversationId: undefined };
+	return {
+		...primaryTelemetry,
+		attributes: {
+			...primaryTelemetry.attributes,
+			[PiGenAIAttr.AgentKind]: "advisor",
+		},
+		agent: identity,
+		conversationId: undefined,
+	};
 }
 
 /**

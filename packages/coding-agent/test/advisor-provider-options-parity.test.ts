@@ -12,8 +12,52 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
+2: 	classifyGatewayResponseCacheStatus,
+	type CostDelta,
+1: 	#enqueueChatUsage(usage: ChatUsageEvent): Promise<void> {
+		const queued = this.#queuedChatUsage.then(() =>
+			this.emit<ChatUsageExtensionEvent>({ type: "chat_usage", usage }),
+		);
+		this.#queuedChatUsage = queued.catch(() => {});
+		return queued;
+	}
+
+	/**
+	 * Forward one canonical chat usage record to extension handlers.
+	 *
+	 * SDK callers can start a prompt before the host initializes its runner, so
+	 * retain a bounded pre-initialize buffer and replay it through the same FIFO
+	 * used by initialized delivery. If the bound is exceeded, drop the oldest
+	 * record and warn without logging usage payload contents.
+	 */
+	async emitChatUsage(usage: ChatUsageEvent): Promise<void> {
+		if (!this.hasHandlers("chat_usage")) return;
+		if (!this.#initialized) {
+			if (this.#pendingChatUsage.length >= MAX_PENDING_CHAT_USAGE) {
+				this.#pendingChatUsage.shift();
+				logger.warn("chat_usage pre-initialize buffer full; dropped oldest record", {
+					maxPending: MAX_PENDING_CHAT_USAGE,
+				});
+			}
+			this.#pendingChatUsage.push(usage);
+			return;
+		}
+		return this.#enqueueChatUsage(usage);
+	}
+
+	/** Emits a session stop pass that can be cancelled with the active settle signal. */
+3: import { Agent, type AgentTelemetryConfig, PiGenAIAttr, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+4: 		expect(advisor.telemetry?.onChatUsage).toBe(onChatUsage);
+		expect(advisor.telemetry?.costEstimator).toBe(costEstimator);
+		expect(advisor.telemetry?.attributes).toEqual({
+			"deployment.id": "test",
+			[PiGenAIAttr.AgentKind]: "advisor",
+		});
+		// The advisor keeps an SDK-provided stream function behind its own retry
+		// budget wrapper. The capture tests below prove delegation and option
+		// forwarding; identity must differ so the advisor can apply its cap.
+		expect(advisor.streamFn).not.toBe(advisorStreamFn);
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -87,8 +131,16 @@ describe("AgentSession advisor provider-options parity", () => {
 
 	it("wraps the inherited streamFn and preserves promptCacheKey and providerSessionState", () => {
 		const advisorStreamFn: StreamFn = (m, ctx, opts) => streamSimple(m, ctx, opts);
+		const onChatUsage = () => {};
+		const costEstimator = () => undefined;
+		const primaryTelemetry: AgentTelemetryConfig = {
+			attributes: { "deployment.id": "test", [PiGenAIAttr.AgentKind]: "primary" },
+			onChatUsage,
+			costEstimator,
+		};
 		const mainAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			telemetry: primaryTelemetry,
 		});
 		session = new AgentSession({
 			agent: mainAgent,
@@ -105,6 +157,48 @@ describe("AgentSession advisor provider-options parity", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");
 
+2: 	classifyGatewayResponseCacheStatus,
+	type CostDelta,
+1: 	#enqueueChatUsage(usage: ChatUsageEvent): Promise<void> {
+		const queued = this.#queuedChatUsage.then(() =>
+			this.emit<ChatUsageExtensionEvent>({ type: "chat_usage", usage }),
+		);
+		this.#queuedChatUsage = queued.catch(() => {});
+		return queued;
+	}
+
+	/**
+	 * Forward one canonical chat usage record to extension handlers.
+	 *
+	 * SDK callers can start a prompt before the host initializes its runner, so
+	 * retain a bounded pre-initialize buffer and replay it through the same FIFO
+	 * used by initialized delivery. If the bound is exceeded, drop the oldest
+	 * record and warn without logging usage payload contents.
+	 */
+	async emitChatUsage(usage: ChatUsageEvent): Promise<void> {
+		if (!this.hasHandlers("chat_usage")) return;
+		if (!this.#initialized) {
+			if (this.#pendingChatUsage.length >= MAX_PENDING_CHAT_USAGE) {
+				this.#pendingChatUsage.shift();
+				logger.warn("chat_usage pre-initialize buffer full; dropped oldest record", {
+					maxPending: MAX_PENDING_CHAT_USAGE,
+				});
+			}
+			this.#pendingChatUsage.push(usage);
+			return;
+		}
+		return this.#enqueueChatUsage(usage);
+	}
+
+	/** Emits a session stop pass that can be cancelled with the active settle signal. */
+3: import { Agent, type AgentTelemetryConfig, PiGenAIAttr, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+4: 		expect(advisor.telemetry?.onChatUsage).toBe(onChatUsage);
+		expect(advisor.telemetry?.costEstimator).toBe(costEstimator);
+		expect(advisor.telemetry?.attributes).toEqual({
+			"deployment.id": "test",
+			[PiGenAIAttr.AgentKind]: "advisor",
+		});
 		// The advisor keeps an SDK-provided stream function behind its own retry
 		// budget wrapper. The capture tests below prove delegation and option
 		// forwarding; identity must differ so the advisor can apply its cap.

@@ -1,7 +1,7 @@
 /**
  * Extension runner - executes extensions and manages their lifecycle.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, ChatUsageEvent } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -21,6 +21,7 @@ import type {
 	BeforeAgentStartEventResult,
 	BeforeProviderRequestEvent,
 	BeforeProviderRequestEventResult,
+	ChatUsageExtensionEvent,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
@@ -216,6 +217,7 @@ async function raceHandlerWithTimeout<T>(
 	}
 }
 
+const MAX_PENDING_CHAT_USAGE = 64;
 const MAX_PENDING_CREDENTIAL_DISABLED = 32;
 
 /**
@@ -269,10 +271,11 @@ export type SwitchSessionHandler = (sessionPath: string) => Promise<{ cancelled:
 export type ShutdownHandler = () => void;
 
 /**
- * Emit `session_shutdown` and clear timers owned by an extension runner.
+ * Emit `session_shutdown` and clear state owned by an extension runner.
  *
- * Returns whether any shutdown handlers were present. Timer cleanup runs even
- * when a handler fails so extension background work cannot outlive its host.
+ * Returns whether any shutdown handlers were present. Timer and pre-initialize
+ * chat-usage cleanup runs even when a handler fails so extension state cannot
+ * outlive its host.
  */
 export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner | undefined): Promise<boolean> {
 	if (!extensionRunner) return false;
@@ -284,6 +287,7 @@ export async function emitSessionShutdownEvent(extensionRunner: ExtensionRunner 
 		return true;
 	} finally {
 		extensionRunner.clearManagedTimers();
+		extensionRunner.clearPendingChatUsage();
 	}
 }
 
@@ -344,6 +348,13 @@ export class ExtensionRunner {
 	 * {@link MAX_PENDING_CREDENTIAL_DISABLED}; oldest entries are dropped under pressure.
 	 */
 	#pendingCredentialDisabled: CredentialDisabledEvent[] = [];
+	/**
+	 * Chat usage can arrive from an SDK caller before the host has initialized
+	 * the runner. Keep a bounded replay buffer so startup delivery is deterministic;
+	 * records can be dropped under pressure or when disposal clears the buffer.
+	 */
+	#pendingChatUsage: ChatUsageEvent[] = [];
+	#queuedChatUsage: Promise<void> = Promise.resolve();
 
 	/**
 	 * Timers scheduled by extensions through the sanctioned `ctx.setInterval` /
@@ -420,9 +431,10 @@ export class ExtensionRunner {
 		// spread adds the `type` discriminator — `event` is the pi-ai shape (no `type`).
 		// Deferred by one microtask so callers that register an onError listener
 		// synchronously after initialize() see handler errors routed through it.
-		const pending = this.#pendingCredentialDisabled.splice(0);
+		const pendingCredentialDisabled = this.#pendingCredentialDisabled.splice(0);
+		const pendingChatUsage = this.#pendingChatUsage.splice(0);
 		queueMicrotask(() => {
-			for (const event of pending) {
+			for (const event of pendingCredentialDisabled) {
 				this.emit({ type: "credential_disabled", ...event }).catch((error: unknown) => {
 					logger.warn("credential_disabled handler threw during initialize flush", {
 						provider: event.provider,
@@ -431,6 +443,17 @@ export class ExtensionRunner {
 				});
 			}
 		});
+		// Reserve every buffered chat usage record in the shared FIFO before a live
+		// record can arrive after initialize returns. Promise callbacks still defer
+		// handler execution, so an onError listener registered by the next turn sees
+		// failures from the flush.
+		for (const usage of pendingChatUsage) {
+			void this.#enqueueChatUsage(usage).catch((error: unknown) => {
+				logger.warn("chat_usage handler threw during initialize flush", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		}
 	}
 
 	/**
@@ -456,6 +479,37 @@ export class ExtensionRunner {
 			return;
 		}
 		await this.emit({ type: "credential_disabled", ...event });
+	}
+
+	#enqueueChatUsage(usage: ChatUsageEvent): Promise<void> {
+		const queued = this.#queuedChatUsage.then(() =>
+			this.emit<ChatUsageExtensionEvent>({ type: "chat_usage", usage }),
+		);
+		this.#queuedChatUsage = queued.catch(() => {});
+		return queued;
+	}
+
+	/**
+	 * Forward one canonical chat usage record to extension handlers.
+	 *
+	 * SDK callers can start a prompt before the host initializes its runner, so
+	 * retain a bounded pre-initialize buffer and replay it through the same FIFO
+	 * used by initialized delivery. If the bound is exceeded, drop the oldest
+	 * record and warn without logging usage payload contents.
+	 */
+	async emitChatUsage(usage: ChatUsageEvent): Promise<void> {
+		if (!this.hasHandlers("chat_usage")) return;
+		if (!this.#initialized) {
+			if (this.#pendingChatUsage.length >= MAX_PENDING_CHAT_USAGE) {
+				this.#pendingChatUsage.shift();
+				logger.warn("chat_usage pre-initialize buffer full; dropped oldest record", {
+					maxPending: MAX_PENDING_CHAT_USAGE,
+				});
+			}
+			this.#pendingChatUsage.push(usage);
+			return;
+		}
+		return this.#enqueueChatUsage(usage);
 	}
 
 	/** Emits a session stop pass that can be cancelled with the active settle signal. */
@@ -676,6 +730,17 @@ export class ExtensionRunner {
 	 */
 	clearManagedTimers(): void {
 		this.#managedTimers.clearAll();
+	}
+
+	/** Release usage records buffered before runner initialization. */
+	clearPendingChatUsage(): void {
+		const droppedCount = this.#pendingChatUsage.length;
+		this.#pendingChatUsage.length = 0;
+		if (droppedCount > 0) {
+			logger.warn("chat_usage pre-initialize buffer cleared during shutdown", {
+				droppedCount,
+			});
+		}
 	}
 
 	createCommandContext(): ExtensionCommandContext {

@@ -1,6 +1,6 @@
 import { describe, expect, spyOn, test } from "bun:test";
 import * as path from "node:path";
-import { RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
+import { resolveRpcChildEnv, RpcClient } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-client";
 import { ptree, TempDir } from "@oh-my-pi/pi-utils";
 
 const MOCK_AGENT = path.join(import.meta.dir, "fixtures", "mock-rpc-agent.ts");
@@ -22,74 +22,71 @@ function isProcessAlive(pid: number): boolean {
 }
 
 describe("RpcClient lifecycle (issue #4079 B)", () => {
-	test("supports inherited and replacement child environments", async () => {
+	test("resolves inherited and replacement child environments", () => {
 		const parentEnv = {
 			MOCK_RPC_PARENT_ONLY_MARKER: "parent-only-marker",
 			MOCK_RPC_SECOND_PARENT_MARKER: "second-parent-only-marker",
 			MOCK_RPC_OVERLAY_MARKER: "parent-overlay-marker",
 		};
-		const previousParentEnv = {
-			MOCK_RPC_PARENT_ONLY_MARKER: process.env.MOCK_RPC_PARENT_ONLY_MARKER,
-			MOCK_RPC_SECOND_PARENT_MARKER: process.env.MOCK_RPC_SECOND_PARENT_MARKER,
-			MOCK_RPC_OVERLAY_MARKER: process.env.MOCK_RPC_OVERLAY_MARKER,
-		};
-		Object.assign(process.env, parentEnv);
 		const suppliedEnv = {
 			MOCK_RPC_SUPPLIED_MARKER: "supplied-marker",
 			MOCK_RPC_OVERLAY_MARKER: "supplied-overlay-marker",
 		};
 
-		try {
-			// Omitted envMode defaults to merge: supplied values overlay inherited values, and merge cannot delete inherited keys.
-			using mergedClient = new RpcClient({ cliPath: MOCK_AGENT, env: suppliedEnv });
-			await mergedClient.start();
-			const mergedReport = await mergedClient.sendForTests<MockEnvironmentReport>({
-				type: "mock_report_environment",
-			});
-			expect(mergedReport).toEqual({
-				parentOnlyMarker: "parent-only-marker",
-				secondParentOnlyMarker: "second-parent-only-marker",
-				overlayMarker: "supplied-overlay-marker",
-				suppliedMarker: "supplied-marker",
-			});
-			await mergedClient.stop();
+		// Omitted envMode defaults to merge: supplied values overlay inherited values, and merge cannot delete inherited keys.
+		expect(resolveRpcChildEnv({ env: suppliedEnv }, parentEnv)).toEqual({
+			...parentEnv,
+			MOCK_RPC_OVERLAY_MARKER: "supplied-overlay-marker",
+			MOCK_RPC_SUPPLIED_MARKER: "supplied-marker",
+		});
 
-			// Replace is the isolation mode: inherited parent markers are absent while supplied keys remain.
-			using replacedClient = new RpcClient({ cliPath: MOCK_AGENT, env: suppliedEnv, envMode: "replace" });
-			await replacedClient.start();
-			const replacedReport = await replacedClient.sendForTests<MockEnvironmentReport>({
-				type: "mock_report_environment",
-			});
-			expect(replacedReport).toEqual({
-				parentOnlyMarker: null,
-				secondParentOnlyMarker: null,
-				overlayMarker: "supplied-overlay-marker",
-				suppliedMarker: "supplied-marker",
-			});
-			await replacedClient.stop();
+		// Replace is the isolation mode: inherited parent markers are absent while supplied keys remain.
+		expect(resolveRpcChildEnv({ env: suppliedEnv, envMode: "replace" }, parentEnv)).toEqual(suppliedEnv);
+		expect(resolveRpcChildEnv({ envMode: "replace" }, parentEnv)).toEqual({});
+	});
 
-			using emptyReplacedClient = new RpcClient({ cliPath: MOCK_AGENT, envMode: "replace" });
-			await emptyReplacedClient.start();
-			const emptyReport = await emptyReplacedClient.sendForTests<MockEnvironmentReport>({
-				type: "mock_report_environment",
-			});
-			expect(emptyReport).toEqual({
-				parentOnlyMarker: null,
-				secondParentOnlyMarker: null,
-				overlayMarker: null,
-				suppliedMarker: null,
-			});
-			await emptyReplacedClient.stop();
-		} finally {
-			if (previousParentEnv.MOCK_RPC_PARENT_ONLY_MARKER === undefined)
-				delete process.env.MOCK_RPC_PARENT_ONLY_MARKER;
-			else process.env.MOCK_RPC_PARENT_ONLY_MARKER = previousParentEnv.MOCK_RPC_PARENT_ONLY_MARKER;
-			if (previousParentEnv.MOCK_RPC_SECOND_PARENT_MARKER === undefined)
-				delete process.env.MOCK_RPC_SECOND_PARENT_MARKER;
-			else process.env.MOCK_RPC_SECOND_PARENT_MARKER = previousParentEnv.MOCK_RPC_SECOND_PARENT_MARKER;
-			if (previousParentEnv.MOCK_RPC_OVERLAY_MARKER === undefined) delete process.env.MOCK_RPC_OVERLAY_MARKER;
-			else process.env.MOCK_RPC_OVERLAY_MARKER = previousParentEnv.MOCK_RPC_OVERLAY_MARKER;
-		}
+	test("reports supplied child environment in merge and replacement modes", async () => {
+		const suppliedEnv = {
+			MOCK_RPC_SUPPLIED_MARKER: "supplied-marker",
+			MOCK_RPC_OVERLAY_MARKER: "supplied-overlay-marker",
+		};
+
+		using mergedClient = new RpcClient({ cliPath: MOCK_AGENT, env: suppliedEnv });
+		await mergedClient.start();
+		const mergedReport = await mergedClient.sendForTests<MockEnvironmentReport>({
+			type: "mock_report_environment",
+		});
+		expect(mergedReport).toMatchObject({
+			overlayMarker: "supplied-overlay-marker",
+			suppliedMarker: "supplied-marker",
+		});
+		await mergedClient.stop();
+
+		using replacedClient = new RpcClient({ cliPath: MOCK_AGENT, env: suppliedEnv, envMode: "replace" });
+		await replacedClient.start();
+		const replacedReport = await replacedClient.sendForTests<MockEnvironmentReport>({
+			type: "mock_report_environment",
+		});
+		expect(replacedReport).toMatchObject({
+			parentOnlyMarker: null,
+			secondParentOnlyMarker: null,
+			overlayMarker: "supplied-overlay-marker",
+			suppliedMarker: "supplied-marker",
+		});
+		await replacedClient.stop();
+
+		using emptyReplacedClient = new RpcClient({ cliPath: MOCK_AGENT, envMode: "replace" });
+		await emptyReplacedClient.start();
+		const emptyReport = await emptyReplacedClient.sendForTests<MockEnvironmentReport>({
+			type: "mock_report_environment",
+		});
+		expect(emptyReport).toMatchObject({
+			parentOnlyMarker: null,
+			secondParentOnlyMarker: null,
+			overlayMarker: null,
+			suppliedMarker: null,
+		});
+		await emptyReplacedClient.stop();
 	}, 20_000);
 
 	test("rejects overlapping starts and reaps the single child", async () => {
