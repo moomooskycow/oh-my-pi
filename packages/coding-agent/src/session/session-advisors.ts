@@ -50,6 +50,7 @@ import {
 	advisorTranscriptFilename,
 	annotateForStaleness,
 	buildAdvisorQuarantineSourceText,
+	deriveAdvisorTelemetry,
 	formatAdvisorBatchContent,
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
@@ -655,21 +656,16 @@ export class SessionAdvisors {
 			);
 			const appendOnlyContext = new AppendOnlyContextManager();
 
-			// Thread the primary's telemetry into the advisor loop so the advisor
-			// model's GenAI spans + usage/cost hooks fire stamped with the local advisor
-			// identity. `conversationId` is cleared so provider telemetry falls back to
-			// the UUIDv7 provider session id, not the local `-advisor` label.
-			const advisorTelemetry = this.#host.agent.telemetry
-				? {
-						...this.#host.agent.telemetry,
-						agent: {
-							id: advisorSessionLabel,
-							name: slug ? `${MODEL_ROLES.advisor.name}: ${advisorName}` : MODEL_ROLES.advisor.name,
-							description: formatModelString(advisorModel),
-						},
-						conversationId: undefined,
-					}
-				: undefined;
+			// Thread the primary's telemetry into the advisor loop so the
+			// advisor's GenAI spans + usage/cost hooks fire stamped with the
+			// local advisor identity and explicit advisor kind. The helper also
+			// clears conversationId so telemetry falls back to the advisor's
+			// provider session id, not the local `-advisor` label.
+			const advisorTelemetry = deriveAdvisorTelemetry(this.#host.agent.telemetry, {
+				id: advisorSessionLabel,
+				name: slug ? `${MODEL_ROLES.advisor.name}: ${advisorName}` : MODEL_ROLES.advisor.name,
+				description: formatModelString(advisorModel),
+			});
 			// Mirror the SDK's provider-shaping options (streamFn/onPayload/...,
 			// providerSessionState, promptCacheKey, transformProviderContext) so each
 			// advisor's requests cache, route, and obfuscate like the main turn.

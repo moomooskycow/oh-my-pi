@@ -1538,6 +1538,7 @@ export async function runRootCommand(
 		AgentLifecycleManager.global().setPersistedSubagentReviverFactory(
 			createPersistedSubagentReviverFactory({
 				session,
+				parentTelemetry: session.agent.telemetry,
 				authStorage,
 				modelRegistry,
 				settings: settingsInstance,

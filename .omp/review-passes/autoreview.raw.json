@@ -1,0 +1,6 @@
+{
+  "findings": [],
+  "overall_confidence": 0.99,
+  "overall_correctness": "patch is correct",
+  "overall_explanation": "No P0 defects are demonstrated by the provided change bundle. The environment-mode handling, overlapping-start guard, child-process launch update, and associated fixture coverage do not introduce a catastrophic correctness or security issue at the required reporting threshold."
+}

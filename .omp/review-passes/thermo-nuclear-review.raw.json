@@ -1,0 +1,12 @@
+{
+  "findings": [
+    {
+      "description": "The added test \"supports inherited and replacement child environments\" calls Object.assign(process.env, parentEnv) and holds those globals for the full multi-client run (up to 20s). Repo test rules forbid file-wide process.env mutation when a narrower seam exists. This change also exports resolveRpcChildEnv(options, parentEnv) with an injectable parentEnv, so merge/replace semantics can be covered with a direct unit test of that helper and RpcClient integration cases that only pass options.env / envMode, avoiding parallel-suite pollution of MOCK_RPC_* variables.",
+      "file": "packages/coding-agent/test/rpc-client.restart.test.ts",
+      "id": "rpc-env-test-process-env-mutation",
+      "line": 36,
+      "severity": "P2",
+      "title": "New env-mode integration test mutates global process.env despite an injectable seam"
+    }
+  ]
+}

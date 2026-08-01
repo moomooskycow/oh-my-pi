@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
+import { PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
@@ -844,12 +845,14 @@ describe("advisor", () => {
 		it("inherits the primary's usage/cost hooks but restamps identity and clears the conversation", () => {
 			const onChatUsage = vi.fn();
 			const costEstimator = vi.fn();
+			const resolveAttributes = vi.fn();
 			const primary: AgentTelemetryConfig = {
 				agent: { id: "main", name: "Main" },
 				conversationId: "session-1",
-				attributes: { "deployment.id": "prod" },
+				attributes: { "deployment.id": "prod", [PiGenAIAttr.AgentKind]: "primary" },
 				onChatUsage,
 				costEstimator,
+				resolveAttributes,
 			};
 			const identity = { id: "session-1-advisor", name: "Advisor", description: "anthropic/claude-sonnet-4-5" };
 
@@ -859,7 +862,8 @@ describe("advisor", () => {
 			// the same pipeline as the primary — the whole point of the fix.
 			expect(derived?.onChatUsage).toBe(onChatUsage);
 			expect(derived?.costEstimator).toBe(costEstimator);
-			expect(derived?.attributes).toEqual({ "deployment.id": "prod" });
+			expect(derived?.attributes).toEqual({ "deployment.id": "prod", [PiGenAIAttr.AgentKind]: "advisor" });
+			expect(derived?.resolveAttributes).toBe(resolveAttributes);
 			// Advisor identity replaces the primary's so spans are attributable to the advisor.
 			expect(derived?.agent).toEqual(identity);
 			// Conversation cleared so the advisor loop falls back to its own `-advisor` session id.
