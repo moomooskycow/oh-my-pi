@@ -2,8 +2,13 @@ import type { Database } from "bun:sqlite";
 import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
+import {
+	type AgentMessage,
+	type AgentTelemetry,
+	instrumentedCompleteSimple,
+	resolveTelemetry,
+} from "@oh-my-pi/pi-agent-core";
+import { type ApiKey, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
 
@@ -143,7 +148,8 @@ export function startMemoryStartupTask(options: {
 	}
 
 	const signal = session.beginLocalMemoryStartup?.() ?? new AbortController().signal;
-	void runMemoryStartup({ session, settings, modelRegistry, agentDir, config: cfg, signal })
+	const telemetry = resolveTelemetry(session.agent?.telemetry, session.sessionId);
+	void runMemoryStartup({ session, settings, modelRegistry, agentDir, config: cfg, signal, telemetry })
 		.catch(error => {
 			if (!signal.aborted) logger.warn("Memory startup failed", { error: String(error) });
 		})
@@ -325,6 +331,7 @@ interface MemoryStartupOptions {
 	agentDir: string;
 	config: MemoryRuntimeConfig;
 	signal: AbortSignal;
+	telemetry?: AgentTelemetry;
 }
 
 function isMemoryStartupActive(options: MemoryStartupOptions): boolean {
@@ -406,6 +413,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
+				telemetry: options.telemetry,
 			});
 			if (!isMemoryStartupActive(options)) return;
 
@@ -566,6 +574,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
+				telemetry: options.telemetry,
 			});
 			if (!isMemoryStartupActive(options)) return;
 			await applyConsolidation(memoryRoot, consolidated);
@@ -726,6 +735,7 @@ async function runStage1Job(options: {
 	modelMaxTokens: number;
 	config: MemoryRuntimeConfig;
 	metadata?: Record<string, unknown>;
+	telemetry?: AgentTelemetry;
 }): Promise<
 	| {
 			kind: "output";
@@ -750,7 +760,7 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
-		const response = await completeSimple(
+		const response = await instrumentedCompleteSimple(
 			model,
 			{
 				systemPrompt: [stageOneSystemTemplate],
@@ -762,6 +772,7 @@ async function runStage1Job(options: {
 				maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
 				reasoning: clampThinkingLevelForModel(model, Effort.Low),
 			},
+			{ telemetry: options.telemetry, oneshotKind: "memory_stage1" },
 		);
 
 		if (response.stopReason === "error") {
@@ -868,6 +879,7 @@ async function runConsolidationModel(options: {
 	model: Model;
 	apiKey: ApiKey;
 	metadata?: Record<string, unknown>;
+	telemetry?: AgentTelemetry;
 }): Promise<{
 	memoryMd: string;
 	memorySummary: string;
@@ -887,7 +899,7 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
-	const response = await completeSimple(
+	const response = await instrumentedCompleteSimple(
 		model,
 		{
 			systemPrompt: [consolidationSystemTemplate],
@@ -899,6 +911,7 @@ async function runConsolidationModel(options: {
 			maxTokens: 8192,
 			reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 		},
+		{ telemetry: options.telemetry, oneshotKind: "memory_consolidation" },
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");

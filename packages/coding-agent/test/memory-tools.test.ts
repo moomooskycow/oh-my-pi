@@ -3,13 +3,16 @@
  *
  * These exercise the public tool surface (factory gating + execute path) by
  * spying on `HindsightApi.prototype.{retain, recall, reflect}` and stubbing
- * Hindsight state on the fake ToolSession. We deliberately do not boot a real
- * session — these tools only need a populated state accessor and Settings.
+ * Hindsight state on the fake ToolSession. A lifecycle test also boots a
+ * minimal Mnemopi session to verify provider-boundary telemetry.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
+import { type ChatUsageEvent, PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import * as ai from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
 import type { HindsightConfig } from "@oh-my-pi/pi-coding-agent/hindsight/config";
@@ -23,7 +26,7 @@ import {
 	MnemopiSessionState,
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
-import type { AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { AgentSession, AgentSessionEventListener } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
@@ -31,6 +34,7 @@ import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflec
 import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
 
 // Mnemopi is lazy-loaded at runtime; preload it for synchronous state construction.
 await Promise.all([loadMnemopi(), loadMnemopiCore()]);
@@ -40,6 +44,40 @@ let registeredState: HindsightSessionState | undefined;
 let registeredMnemopiState: MnemopiSessionState | undefined;
 let tempDbPath: string | undefined;
 let tempDbDir: TempDir | undefined;
+function createMnemopiModel(): Model {
+	return {
+		id: "test-smol",
+		name: "test-smol",
+		api: "openai-responses",
+		provider: "openai",
+		baseUrl: "https://example.test/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 32_000,
+		maxTokens: 4_096,
+	} as unknown as Model;
+}
+
+function createMnemopiAssistant(text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "openai-responses",
+		provider: "openai",
+		model: "test-smol",
+		usage: {
+			input: 8,
+			output: 4,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 12,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
 
 function makeConfig(overrides: Partial<HindsightConfig> = {}): HindsightConfig {
 	return {
@@ -466,6 +504,87 @@ describe("Mnemopi backend lifecycle", () => {
 		await tempDbDir?.remove().catch(() => {});
 		tempDbDir = undefined;
 		tempDbPath = undefined;
+	});
+
+	it("emits smol provider telemetry for session-owned Mnemopi LLM calls", async () => {
+		tempDbDir = TempDir.createSync("@mnemopi-telemetry-");
+		const dbPath = tempDbDir.join("mnemopi.db");
+		tempDbPath = dbPath;
+		const model = createMnemopiModel();
+		const settings = Settings.isolated({
+			"memory.backend": "mnemopi",
+			"mnemopi.dbPath": dbPath,
+			"mnemopi.llmMode": "smol",
+			"mnemopi.noEmbeddings": true,
+			modelRoles: { smol: `${model.provider}/${model.id}` },
+		});
+		const modelRegistry = {
+			getAvailable: () => [model],
+			getApiKey: async () => "test-api-key",
+			getApiKeyForProvider: async () => undefined,
+			resolver: () => async () => "test-api-key",
+		} as unknown as AgentSession["modelRegistry"];
+		const exporter = new InMemorySpanExporter();
+		const tracerProvider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		const usageEvents: Array<{ conversationId: string | undefined }> = [];
+		const session = {
+			sessionId: TEST_SESSION_ID,
+			settings,
+			modelRegistry,
+			agent: {
+				telemetry: {
+					tracer: tracerProvider.getTracer("mnemopi-telemetry-test"),
+					onChatUsage: (event: ChatUsageEvent) => usageEvents.push({ conversationId: event.conversationId }),
+				},
+			},
+			sessionManager: {
+				getEntries: () => [],
+				getCwd: () => "/tmp/mnemopi-telemetry",
+			},
+			subscribe: () => () => {},
+			refreshBaseSystemPrompt: async () => {},
+		} as unknown as AgentSession;
+		let state: MnemopiSessionState | undefined;
+		try {
+			const completeSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue(
+				createMnemopiAssistant(
+					JSON.stringify({
+						facts: [],
+						instructions: [],
+						preferences: ["I prefer tabs"],
+						timelines: [],
+						kg: [],
+					}),
+				),
+			);
+			await mnemopiBackend.start({
+				session,
+				settings,
+				modelRegistry,
+				agentDir: tempDbDir.path(),
+				taskDepth: 0,
+			});
+			state = getMnemopiSessionState(session);
+			if (!state) throw new Error("Mnemopi backend did not install session state");
+			registeredMnemopiState = state;
+			await state.retainMessages([{ role: "user", content: "I prefer tabs" }], "telemetry-source");
+			await state.consolidate({ sleep: false });
+
+			expect(completeSpy).toHaveBeenCalledTimes(1);
+			expect(usageEvents).toHaveLength(1);
+			expect(usageEvents[0]?.conversationId).toBe(TEST_SESSION_ID);
+			const spans = exporter
+				.getFinishedSpans()
+				.filter(span => span.attributes[PiGenAIAttr.OneshotKind] === "mnemopi_llm");
+			expect(spans).toHaveLength(1);
+		} finally {
+			setMnemopiSessionState(session, undefined);
+			if (state) await state.dispose({ consolidate: false });
+			registeredMnemopiState = undefined;
+			await tracerProvider.shutdown();
+		}
 	});
 
 	it("auto-retain stores only the not-yet-retained suffix", async () => {

@@ -6,7 +6,7 @@
 
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { PiGenAIAttr, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async";
@@ -858,6 +858,8 @@ interface RunMonitorArgs {
 	modelRegistry?: ModelRegistry;
 	/** Parent settings for tiny-model label generation. */
 	settings?: Settings;
+	/** Parent telemetry for tiny-model label generation. */
+	parentTelemetry?: AgentTelemetryConfig;
 	modelOverride?: string | string[];
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
@@ -1223,7 +1225,9 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	// failures just leave the label unset.
 	const labelSource = assignment?.trim();
 	if (!args.description && args.modelRegistry && args.settings && labelSource) {
-		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal)
+		generateTaskLabel(labelSource, args.modelRegistry, args.settings, id, abortSignal, {
+			telemetryConfig: args.parentTelemetry,
+		})
 			.then(label => {
 				if (!label || abortSignal.aborted || progress.description) return;
 				progress.description = label;
@@ -2500,6 +2504,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		description: options.description,
 		modelRegistry: options.modelRegistry,
 		settings,
+		parentTelemetry: options.parentTelemetry,
 		modelOverride,
 		signal,
 		onProgress,
@@ -2722,6 +2727,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				options.parentTelemetry && subagentAgentIdentity
 					? {
 							...options.parentTelemetry,
+							attributes: {
+								...options.parentTelemetry.attributes,
+								[PiGenAIAttr.AgentKind]: "subagent",
+							},
 							agent: subagentAgentIdentity,
 							// Clear parent's conversationId; the child loop falls back to
 							// its own AgentLoopConfig.sessionId.

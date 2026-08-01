@@ -10,6 +10,7 @@ import { agentLoop } from "@oh-my-pi/pi-agent-core/agent-loop";
 import {
 	type AgentTelemetryConfig,
 	type ChatUsageEvent,
+	type CostDelta,
 	detectGatewayFromHeaders,
 	GenAIAttr,
 	GenAIOperation,
@@ -21,7 +22,7 @@ import {
 	type TelemetryHookContext,
 } from "@oh-my-pi/pi-agent-core/telemetry";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Message, Usage } from "@oh-my-pi/pi-ai";
 import { z } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import type { EventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -428,6 +429,7 @@ describe("agent-loop OTEL instrumentation", () => {
 						cacheRead: 0,
 						cacheWrite: 0,
 						totalTokens: 1500,
+						cost: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, total: 5 },
 					},
 				},
 			],
@@ -450,6 +452,110 @@ describe("agent-loop OTEL instrumentation", () => {
 		expect(chat?.attributes[PiGenAIAttr.CostEstimatedUsd]).toBeCloseTo(0.0105, 6);
 		expect(chat?.attributes[PiGenAIAttr.CostInputUsd]).toBeCloseTo(0.003, 6);
 		expect(chat?.attributes[PiGenAIAttr.CostOutputUsd]).toBeCloseTo(0.0075, 6);
+	});
+
+	it("omits invalid custom cost estimates", async () => {
+		const mock = createMockModel({
+			...MOCK_IDENT,
+			responses: [
+				{
+					content: ["ok"],
+					stopReason: "stop",
+					usage: { input: 10, output: 5, totalTokens: 15 },
+				},
+			],
+		});
+		const events: ChatUsageEvent[] = [];
+		const warnings: string[] = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			telemetry: {
+				costEstimator: () => ({ usd: Number.NaN, inputUsd: -1 }),
+				onChatUsage: event => void events.push(event),
+				onTelemetryWarning: warning => void warnings.push(warning.code),
+			},
+		};
+		const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [] };
+		await runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, mock.stream));
+
+		const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
+		expect(chat?.attributes[PiGenAIAttr.CostEstimatedUsd]).toBeUndefined();
+		expect(events[0]?.cost).toBeUndefined();
+		expect(warnings).toEqual(["cost_estimator_failed"]);
+	});
+
+	it("uses catalog usage cost for chat usage and cost deltas without an estimator", async () => {
+		const mock = createMockModel({
+			...MOCK_IDENT,
+			responses: [
+				{
+					content: ["ok"],
+					stopReason: "stop",
+					usage: {
+						input: 100,
+						output: 50,
+						cacheRead: 10,
+						cacheWrite: 20,
+						totalTokens: 180,
+						cost: { input: 1, output: 4, cacheRead: 2, cacheWrite: 3, total: 10 },
+					},
+				},
+			],
+		});
+		const events: ChatUsageEvent[] = [];
+		const deltas: CostDelta[] = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			telemetry: {
+				onChatUsage: event => {
+					events.push(event);
+				},
+				onCostDelta: delta => deltas.push(delta),
+			},
+		};
+		const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [] };
+		await runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, mock.stream));
+
+		const chat = findSpan(exporter.getFinishedSpans(), "chat mock-model");
+		expect(chat?.attributes[PiGenAIAttr.CostEstimatedUsd]).toBe(10);
+		expect(chat?.attributes[PiGenAIAttr.CostInputUsd]).toBe(6);
+		expect(chat?.attributes[PiGenAIAttr.CostOutputUsd]).toBe(4);
+		expect(events).toHaveLength(1);
+		expect(events[0]?.usage).toEqual({
+			inputTokens: 130,
+			outputTokens: 50,
+			totalTokens: 180,
+			cachedInputTokens: 10,
+			cacheWriteTokens: 20,
+			cacheWrite1hTokens: undefined,
+			reasoningOutputTokens: undefined,
+		});
+		expect(events[0]?.cost).toEqual({ usd: 10, inputUsd: 6, outputUsd: 4 });
+		expect(deltas).toEqual([
+			{
+				agent: undefined,
+				conversationId: undefined,
+				costUsd: 10,
+				costUnavailableReason: undefined,
+				inputUsd: 6,
+				model: "mock-model",
+				outputUsd: 4,
+				provider: "mock-provider",
+				serviceTier: undefined,
+				stepNumber: 0,
+				usage: {
+					inputTokens: 130,
+					outputTokens: 50,
+					totalTokens: 180,
+					cachedInputTokens: 10,
+					cacheWriteTokens: 20,
+					cacheWrite1hTokens: undefined,
+					reasoningOutputTokens: undefined,
+				},
+			},
+		]);
 	});
 
 	it("applies dynamic attributes, normalization hooks, and cost deltas", async () => {
@@ -528,7 +634,14 @@ describe("agent-loop OTEL instrumentation", () => {
 				{
 					content: ["ok"],
 					stopReason: "stop",
-					usage: { input: 50, output: 25, cacheRead: 10, totalTokens: 85 },
+					usage: {
+						input: 50,
+						output: 25,
+						cacheRead: 10,
+						cacheWrite: 12,
+						cttl: { ephemeral1h: 15 },
+						totalTokens: 97,
+					},
 				},
 			],
 		});
@@ -552,22 +665,68 @@ describe("agent-loop OTEL instrumentation", () => {
 		const ev = events[0];
 		expect(ev?.model).toBe("mock-model");
 		expect(ev?.provider).toBe("normalized-provider");
+		expect(ev?.modelProvider).toBe("mock-provider");
 		expect(ev?.stepNumber).toBe(0);
 		expect(ev?.agent).toEqual({ id: "agent-1", name: "worker" });
-		expect(ev?.usage.inputTokens).toBe(60);
+		expect(ev?.usage.inputTokens).toBe(72);
 		expect(ev?.usage.outputTokens).toBe(25);
 		expect(ev?.usage.cachedInputTokens).toBe(10);
-		expect(ev?.usage.totalTokens).toBe(85);
-		expect(ev?.cost).toBeUndefined();
+		expect(ev?.usage.cacheWriteTokens).toBe(12);
+		expect(ev?.usage.cacheWrite1hTokens).toBe(12);
+		expect(ev?.usage.totalTokens).toBe(97);
 		expect(ev?.attributes?.["tenant.id"]).toBe("tenant-7");
 		expect(ev?.attributes?.["telemetry.kind"]).toBe("chat");
 		expect(ev?.span).toBeDefined();
 	});
 
+	it("includes static telemetry attributes in ChatUsageEvent", async () => {
+		const mock = createMockModel({
+			...MOCK_IDENT,
+			responses: [
+				{
+					content: ["ok"],
+					stopReason: "stop",
+					usage: { input: 4, output: 2, totalTokens: 6 },
+				},
+			],
+		});
+		const events: ChatUsageEvent[] = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			telemetry: {
+				attributes: {
+					"deployment.id": "static-tenant",
+					[PiGenAIAttr.AgentKind]: "advisor",
+				},
+				onChatUsage: event => void events.push(event),
+			},
+		};
+		const ctx: AgentContext = { systemPrompt: [], messages: [], tools: [] };
+		await runAndDrain(agentLoop([createUserMessage("hi")], ctx, config, undefined, mock.stream));
+
+		expect(events).toHaveLength(1);
+		expect(events[0]?.attributes).toEqual({
+			"deployment.id": "static-tenant",
+			[PiGenAIAttr.AgentKind]: "advisor",
+		});
+	});
+
 	it("forwards cost estimate to onChatUsage when estimator is configured", async () => {
 		const mock = createMockModel({
 			...MOCK_IDENT,
-			responses: [{ content: ["ok"], stopReason: "stop", usage: { input: 100, output: 50, totalTokens: 150 } }],
+			responses: [
+				{
+					content: ["ok"],
+					stopReason: "stop",
+					usage: {
+						input: 100,
+						output: 50,
+						totalTokens: 150,
+						cost: { input: 2, output: 3, cacheRead: 0, cacheWrite: 0, total: 5 },
+					},
+				},
+			],
 		});
 		const events: ChatUsageEvent[] = [];
 		const config: AgentLoopConfig = {
@@ -612,6 +771,47 @@ describe("agent-loop OTEL instrumentation", () => {
 		expect(events).toHaveLength(1);
 		const cost = events[0]?.cost;
 		expect(cost && "unavailable" in cost ? cost.unavailable : undefined).toBe("unsupported_tier");
+	});
+
+	it("omits absent or invalid catalog cost without throwing", async () => {
+		const mock = createMockModel({ ...MOCK_IDENT });
+		const events: ChatUsageEvent[] = [];
+		const deltas: CostDelta[] = [];
+		const telemetry = resolveTelemetry(
+			{
+				onChatUsage: event => {
+					events.push(event);
+				},
+				onCostDelta: delta => deltas.push(delta),
+			},
+			undefined,
+		);
+		expect(telemetry).toBeDefined();
+		const usageBase = {
+			input: 10,
+			output: 5,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 15,
+		};
+		const usages = [
+			usageBase as unknown as Usage,
+			{ ...usageBase, cost: { total: Number.NaN } } as unknown as Usage,
+			{ ...usageBase, cost: { total: -1 } } as unknown as Usage,
+			{ ...usageBase, cost: { total: Number.POSITIVE_INFINITY } } as unknown as Usage,
+		];
+		for (const [stepNumber, usage] of usages.entries()) {
+			await recordManualChatTelemetry(telemetry, { model: mock.model, usage, stepNumber });
+		}
+
+		expect(events).toHaveLength(usages.length);
+		expect(events.map(event => event.cost)).toEqual([undefined, undefined, undefined, undefined]);
+		expect(deltas).toHaveLength(0);
+		for (const span of exporter.getFinishedSpans()) {
+			expect(span.attributes[PiGenAIAttr.CostEstimatedUsd]).toBeUndefined();
+			expect(span.attributes[PiGenAIAttr.CostInputUsd]).toBeUndefined();
+			expect(span.attributes[PiGenAIAttr.CostOutputUsd]).toBeUndefined();
+		}
 	});
 
 	it("skips onChatUsage in recordManualChatTelemetry when usage is undefined", async () => {

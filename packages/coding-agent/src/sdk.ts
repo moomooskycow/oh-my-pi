@@ -6,7 +6,9 @@ import {
 	type AgentTelemetryConfig,
 	type AgentTool,
 	AppendOnlyContextManager,
+	type ChatUsageEvent,
 	filterProviderReplayMessages,
+	PiGenAIAttr,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -315,6 +317,22 @@ function applyMCPEnvironment(result: { exaApiKeys: string[] }): void {
 	if (result.exaApiKeys.length > 0 && !$env.EXA_API_KEY) {
 		Bun.env.EXA_API_KEY = result.exaApiKeys[0];
 	}
+}
+/**
+ * Marks the one SDK-owned telemetry callback bridge. Child sessions inherit
+ * their parent's callback by reference; detecting this marker prevents each
+ * nested session from forwarding the same usage record again.
+ */
+const EXTENSION_CHAT_USAGE_BRIDGE = Symbol("omp.extensionChatUsageBridge");
+type ChatUsageCallback = NonNullable<AgentTelemetryConfig["onChatUsage"]>;
+type BridgedChatUsageCallback = ChatUsageCallback & {
+	[EXTENSION_CHAT_USAGE_BRIDGE]?: true;
+};
+
+function isExtensionChatUsageBridge(
+	callback: AgentTelemetryConfig["onChatUsage"],
+): callback is BridgedChatUsageCallback {
+	return (callback as BridgedChatUsageCallback | undefined)?.[EXTENSION_CHAT_USAGE_BRIDGE] === true;
 }
 
 // Types
@@ -1046,6 +1064,7 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 export interface AutoLearnCaptureRunnerOptions {
 	sourceAgent: Agent;
 	captureTools: AgentTool[];
+	parentTelemetry?: AgentTelemetryConfig;
 	createAgent: (options: AgentOptions) => Agent;
 	onPayload?: SimpleStreamOptions["onPayload"];
 	onResponse?: SimpleStreamOptions["onResponse"];
@@ -1061,6 +1080,20 @@ export function createAutoLearnCaptureRunner(
 		const captureModel = options.sourceAgent.state.model;
 		if (!captureModel) return;
 
+		const captureTelemetry: AgentTelemetryConfig | undefined = options.parentTelemetry
+			? {
+					...options.parentTelemetry,
+					attributes: {
+						...options.parentTelemetry.attributes,
+						[PiGenAIAttr.AgentKind]: "subagent",
+					},
+					agent: {
+						id: `${options.sourceAgent.sessionId ?? "auto-learn"}-auto-learn`,
+						name: "auto-learn",
+					},
+					conversationId: undefined,
+				}
+			: undefined;
 		const captureSessionId = options.createSessionId?.() ?? Bun.randomUUIDv7();
 		const captureProviderSessionState = new Map<string, ProviderSessionState>();
 		const captureMessages = options.sourceAgent.state.messages.map((message): AgentMessage => {
@@ -1087,6 +1120,7 @@ export function createAutoLearnCaptureRunner(
 			getApiKey: requestModel => options.sourceAgent.getApiKey?.(requestModel),
 			onPayload: options.onPayload,
 			onResponse: options.onResponse,
+			telemetry: captureTelemetry,
 		});
 		captureAgent.setMetadataResolver(provider => options.sourceAgent.metadataForProvider(provider));
 		const captureMessage: CustomMessage = {
@@ -3106,6 +3140,43 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorTools,
 			titleSystemPrompt: options.titleSystemPrompt,
 		});
+		// AgentSession is the owning extension seam for usage delivery. Install the
+		// bridge only when this runner has a handler; otherwise leave telemetry
+		// untouched so SDK callers retain the no-handler fast path.
+		if (extensionRunner.hasHandlers("chat_usage") && !isExtensionChatUsageBridge(options.telemetry?.onChatUsage)) {
+			const previousOnChatUsage = options.telemetry?.onChatUsage;
+			const onChatUsage = (async (event: ChatUsageEvent) => {
+				// Take the extension FIFO ticket before awaiting the caller's callback.
+				// A slow previous hook must not reorder extension-visible usage records.
+				const extensionDelivery = session.emitChatUsage(event);
+				let previousError: unknown;
+				let previousFailed = false;
+				try {
+					await previousOnChatUsage?.(event);
+				} catch (error) {
+					previousFailed = true;
+					previousError = error;
+				}
+				let extensionError: unknown;
+				let extensionFailed = false;
+				try {
+					await extensionDelivery;
+				} catch (error) {
+					extensionFailed = true;
+					extensionError = error;
+				}
+				if (previousFailed) throw previousError;
+				if (extensionFailed) throw extensionError;
+			}) as BridgedChatUsageCallback;
+			Object.defineProperty(onChatUsage, EXTENSION_CHAT_USAGE_BRIDGE, { value: true });
+			agent.setTelemetry(
+				options.telemetry
+					? { ...options.telemetry, onChatUsage }
+					: {
+							onChatUsage,
+						},
+			);
+		}
 		hasSession = true;
 		session.yieldQueue.register<McpNotificationEntry>("mcp-notification", {
 			build: buildMcpNotificationBatchMessage,
@@ -3256,9 +3327,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 			});
 		};
-
 		const runAutoLearnCapture = createAutoLearnCaptureRunner({
 			sourceAgent: agent,
+			parentTelemetry: agent.telemetry,
 			captureTools: autoLearnCaptureTools,
 			onPayload,
 			onResponse,

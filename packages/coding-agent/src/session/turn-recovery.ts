@@ -564,6 +564,7 @@ export class TurnRecovery {
 				sessionId: this.#host.sessionId(),
 				metadataResolver: (provider: string) => this.#host.agent.metadataForProvider(provider),
 				signal: controller.signal,
+				telemetryConfig: this.#host.agent.telemetry,
 			});
 		} finally {
 			clearTimeout(timeout);

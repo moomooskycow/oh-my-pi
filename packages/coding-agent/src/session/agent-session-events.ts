@@ -1,4 +1,4 @@
-import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, ChatUsageEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
@@ -11,6 +11,7 @@ import type { CustomMessage } from "./messages";
 /** Session-specific events that extend the core AgentEvent. */
 export type AgentSessionEvent =
 	| Exclude<AgentEvent, { type: "agent_end" }>
+	| { type: "chat_usage"; usage: ChatUsageEvent }
 	| (Extract<AgentEvent, { type: "agent_end" }> & {
 			/** False when an async delivery will resume the session before its true final settle. */
 			isTerminal?: boolean;

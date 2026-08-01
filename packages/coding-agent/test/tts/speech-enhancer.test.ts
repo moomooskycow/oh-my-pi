@@ -1,7 +1,30 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as ai from "@oh-my-pi/pi-ai";
+import { PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
+import type * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { BlockAccumulator, SpeechEnhancer } from "@oh-my-pi/pi-coding-agent/tts/speech-enhancer";
+import { BasicTracerProvider, InMemorySpanExporter, SimpleSpanProcessor } from "@opentelemetry/sdk-trace-base";
+
+function makeTelemetryProbe() {
+	const exporter = new InMemorySpanExporter();
+	const provider = new BasicTracerProvider({ spanProcessors: [new SimpleSpanProcessor(exporter)] });
+	const onChatUsage = vi.fn();
+	return {
+		exporter,
+		onChatUsage,
+		telemetry: { tracer: provider.getTracer("speech-enhancer-tests"), onChatUsage },
+	};
+}
+
+function makeCompletion(text: string) {
+	return {
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		stopReason: "stop",
+		content: [{ type: "text", text }],
+		usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+	} as never;
+}
 
 afterEach(() => {
 	vi.restoreAllMocks();
@@ -28,20 +51,28 @@ describe("SpeechEnhancer rewriting", () => {
 			getApiKey: async () => "test-key",
 			resolver: () => async () => "test-key",
 		} as never;
-		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			stopReason: "stop",
-			content: [{ type: "text", text: "Spoken text" }],
-		} as never);
-
-		const rewritten = await new SpeechEnhancer({ settings, registry, sessionId: "session-1" }).rewrite(
-			"**Spoken text**",
+		const completeSimpleMock = vi.fn(async (..._args: Parameters<typeof ai.completeSimple>) =>
+			makeCompletion("Spoken text"),
 		);
+		const probe = makeTelemetryProbe();
+
+		const rewritten = await new SpeechEnhancer({
+			settings,
+			registry,
+			sessionId: "session-1",
+			telemetryConfig: probe.telemetry,
+			completeImpl: completeSimpleMock as unknown as typeof ai.completeSimple,
+		}).rewrite("**Spoken text**");
 		const options = completeSimpleMock.mock.calls[0]?.[2] as
 			| { disableReasoning?: boolean; maxTokens?: number }
 			| undefined;
 
 		expect(rewritten).toBe("Spoken text");
 		expect(options).toMatchObject({ disableReasoning: true, maxTokens: 1536 });
+		const spans = probe.exporter.getFinishedSpans();
+		expect(probe.onChatUsage).toHaveBeenCalledTimes(1);
+		expect(spans).toHaveLength(1);
+		expect(spans[0]?.attributes[PiGenAIAttr.OneshotKind]).toBe("speech_rewrite");
 	});
 });
 

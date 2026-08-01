@@ -578,6 +578,7 @@ export class ModelControls {
 					sessionId: this.#host.sessionId(),
 					signal: controller.signal,
 					metadataResolver: provider => this.#host.agent.metadataForProvider(provider),
+					telemetryConfig: this.#host.agent.telemetry,
 				});
 			} catch (error) {
 				logger.debug("auto-thinking: classification failed; using fallback level", {

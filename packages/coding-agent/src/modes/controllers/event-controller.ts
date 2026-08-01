@@ -147,6 +147,7 @@ export class EventController {
 						registry: session.modelRegistry,
 						sessionId: session.sessionId,
 						metadataResolver: provider => session.agent.metadataForProvider(provider),
+						telemetryConfig: session.agent.telemetry,
 					})
 				: null,
 		);
@@ -162,6 +163,7 @@ export class EventController {
 		});
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
+			chat_usage: async () => {},
 			agent_end: e => this.#handleAgentEnd(e),
 			turn_start: async () => this.#handleTurnStart(),
 			turn_end: async e => this.#handleTurnEnd(e),

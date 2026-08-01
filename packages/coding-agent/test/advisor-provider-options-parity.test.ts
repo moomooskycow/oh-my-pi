@@ -12,7 +12,7 @@
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentTelemetryConfig, PiGenAIAttr, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import type { Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -75,8 +75,16 @@ describe("AgentSession advisor provider-options parity", () => {
 
 	it("inherits streamFn, promptCacheKey, and providerSessionState from the session", () => {
 		const advisorStreamFn: StreamFn = (m, ctx, opts) => streamSimple(m, ctx, opts);
+		const onChatUsage = () => {};
+		const costEstimator = () => undefined;
+		const primaryTelemetry: AgentTelemetryConfig = {
+			attributes: { "deployment.id": "test", [PiGenAIAttr.AgentKind]: "primary" },
+			onChatUsage,
+			costEstimator,
+		};
 		const mainAgent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			telemetry: primaryTelemetry,
 		});
 		session = new AgentSession({
 			agent: mainAgent,
@@ -93,6 +101,12 @@ describe("AgentSession advisor provider-options parity", () => {
 		const advisor = session.getAdvisorAgent();
 		if (!advisor) throw new Error("Expected advisor agent to be live");
 
+		expect(advisor.telemetry?.onChatUsage).toBe(onChatUsage);
+		expect(advisor.telemetry?.costEstimator).toBe(costEstimator);
+		expect(advisor.telemetry?.attributes).toEqual({
+			"deployment.id": "test",
+			[PiGenAIAttr.AgentKind]: "advisor",
+		});
 		// Stream wrapper from the SDK reaches the advisor — without it,
 		// `providers.openrouterVariant` would never be applied to advisor
 		// requests (issue #3639) and the Agent would fall back to bare

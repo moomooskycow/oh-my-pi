@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import { type AgentTelemetryConfig, PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
 
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -22,6 +23,8 @@ export interface PersistedSubagentReviveContext {
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
 	settings: Settings;
+	/** Parent session telemetry inherited by revived subagents. */
+	parentTelemetry?: AgentTelemetryConfig;
 	/** LSP policy of the top-level session; revived subagents inherit it rather than defaulting on. */
 	enableLsp: boolean;
 }
@@ -84,8 +87,24 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const childTelemetry: AgentTelemetryConfig | undefined = ctx.parentTelemetry
+				? {
+						...ctx.parentTelemetry,
+						attributes: {
+							...ctx.parentTelemetry.attributes,
+							[PiGenAIAttr.AgentKind]: "subagent",
+						},
+						agent: {
+							id: ref.id,
+							name: ref.displayName,
+						},
+						// Clear the parent's conversation id so the revived child session id owns it.
+						conversationId: undefined,
+					}
+				: undefined;
 			const { session } = await createAgentSession({
 				cwd: ctx.session.sessionManager.getCwd(),
+				telemetry: childTelemetry,
 				authStorage: ctx.authStorage,
 				modelRegistry: ctx.modelRegistry,
 				settings: createSubagentSettings(

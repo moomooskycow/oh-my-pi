@@ -2,9 +2,13 @@
  * Generate commit messages from diffs using a smol, fast model.
  * Follows the same pattern as title-generator.ts.
  */
-import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
-import { completeSimple } from "@oh-my-pi/pi-ai";
+import {
+	type AgentTelemetryConfig,
+	instrumentedCompleteSimple,
+	resolveTelemetry,
+	type ThinkingLevel,
+} from "@oh-my-pi/pi-agent-core";
+import type { Api, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
@@ -22,6 +26,11 @@ const MAX_DIFF_CHARS = 4000;
 // one that never emits thinking. `maxTokens` is a hard cap — non-thinking
 // completions still return in a handful of tokens (issue #4355).
 const COMMIT_MAX_TOKENS = 1024;
+
+export interface CommitMessageOptions {
+	telemetryConfig?: AgentTelemetryConfig;
+	completeImpl?: typeof completeSimple;
+}
 
 /** File patterns that should be excluded from commit message generation diffs. */
 const NOISE_SUFFIXES = [".lock", ".lockb", "-lock.json", "-lock.yaml"];
@@ -84,6 +93,7 @@ export async function generateCommitMessage(
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
+	options?: CommitMessageOptions,
 ): Promise<string | null> {
 	const candidates = getSmolModelCandidates(registry, settings);
 	if (candidates.length === 0) {
@@ -99,6 +109,7 @@ export async function generateCommitMessage(
 		return null;
 	}
 	const userMessage = `<diff>\n${truncatedDiff}\n</diff>`;
+	const telemetry = resolveTelemetry(options?.telemetryConfig, sessionId);
 
 	for (const candidate of candidates) {
 		const apiKey = await registry.getApiKey(candidate.model, sessionId);
@@ -106,7 +117,7 @@ export async function generateCommitMessage(
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
-			const response = await completeSimple(
+			const response = await instrumentedCompleteSimple(
 				candidate.model,
 				{
 					systemPrompt: [COMMIT_SYSTEM_PROMPT],
@@ -116,6 +127,11 @@ export async function generateCommitMessage(
 					apiKey: registry.resolver(candidate.model, sessionId),
 					maxTokens,
 					reasoning: toReasoningEffort(candidate.thinkingLevel),
+				},
+				{
+					telemetry,
+					oneshotKind: "isolation_commit_message",
+					completeImpl: options?.completeImpl,
 				},
 			);
 

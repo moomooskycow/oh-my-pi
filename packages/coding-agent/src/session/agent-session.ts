@@ -35,6 +35,7 @@ import {
 	type AgentTurnEndContext,
 	AppendOnlyContextManager,
 	type AsideMessage,
+	type ChatUsageEvent,
 	resolveTelemetry,
 	type StreamFn,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
@@ -3090,6 +3091,10 @@ export class AgentSession {
 		}
 
 		if (!this.#extensionRunner.hasHandlers(event.type)) return;
+		if (event.type === "chat_usage") {
+			await this.#extensionRunner.emitChatUsage(event.usage);
+			return;
+		}
 		if (event.type === "agent_end") {
 			// `agent_end` extension notification is emitted from the settled
 			// agent_end maintenance path so `session_stop` control hooks are not
@@ -5523,6 +5528,7 @@ export class AgentSession {
 			provider => this.agent.metadataForProvider(provider),
 			this.#titleSystemPrompt,
 			this.#titleGenerationAbortController.signal,
+			{ telemetryConfig: this.agent.telemetry, oneshotKind: "session_title" },
 		);
 	}
 
@@ -7921,6 +7927,18 @@ export class AgentSession {
 	// =========================================================================
 	// Extension System
 	// =========================================================================
+
+	/**
+	 * Deliver one canonical chat-usage record to the active extension runner.
+	 *
+	 * Delivery uses the same FIFO as session extension events so concurrent
+	 * provider calls cannot reorder usage records. No session message or summary
+	 * is persisted.
+	 */
+	async emitChatUsage(usage: ChatUsageEvent): Promise<void> {
+		if (!this.#extensionRunner?.hasHandlers("chat_usage")) return;
+		await this.#queueExtensionEvent({ type: "chat_usage", usage });
+	}
 
 	/**
 	 * Check if extensions have handlers for a specific event type.

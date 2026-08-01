@@ -1,6 +1,6 @@
-import { type AssistantMessage, completeSimple } from "@oh-my-pi/pi-ai";
+import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage, completeSimple } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
-
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
@@ -30,6 +30,8 @@ export interface ClassifyUnexpectedStopDeps {
 	sessionId: string;
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined;
 	signal?: AbortSignal;
+	telemetryConfig?: AgentTelemetryConfig;
+	completeImpl?: typeof completeSimple;
 }
 
 export function isUnexpectedStopCandidate(message: AssistantMessage): boolean {
@@ -79,7 +81,8 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 	const metadata = deps.metadataResolver?.(model.provider);
 	const maxTokens = REASONING_SAFE_MAX_TOKENS;
 
-	const response = await completeSimple(
+	const telemetry = resolveTelemetry(deps.telemetryConfig, deps.sessionId);
+	const response = await instrumentedCompleteSimple(
 		model,
 		{
 			systemPrompt: [CLASSIFIER_SYSTEM_PROMPT],
@@ -91,6 +94,11 @@ async function classifyOnline(text: string, deps: ClassifyUnexpectedStopDeps): P
 			disableReasoning: true,
 			metadata,
 			signal: deps.signal,
+		},
+		{
+			telemetry,
+			oneshotKind: "unexpected_stop_classifier",
+			completeImpl: deps.completeImpl,
 		},
 	);
 

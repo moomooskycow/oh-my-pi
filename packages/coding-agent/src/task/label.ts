@@ -5,9 +5,10 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
 import taskLabelSystemPrompt from "../prompts/system/task-label.md" with { type: "text" };
-import { generateSessionTitle } from "../utils/title-generator";
+import { generateSessionTitle, type TitleGenerationOptions } from "../utils/title-generator";
 
 const TASK_LABEL_SYSTEM_PROMPT = prompt.render(taskLabelSystemPrompt);
+export type TaskLabelOptions = Pick<TitleGenerationOptions, "telemetryConfig" | "completeImpl">;
 
 /** Compresses a delegated assignment into a one-sentence UI label via the tiny title model — fired by the executor spawn path because the task wire schema no longer carries a `description`; null on empty input or failure. */
 export async function generateTaskLabel(
@@ -16,6 +17,7 @@ export async function generateTaskLabel(
 	settings: Settings,
 	sessionId?: string,
 	signal?: AbortSignal,
+	options?: TaskLabelOptions,
 ): Promise<string | null> {
 	const text = assignment.trim();
 	if (!text) return null;
@@ -29,6 +31,7 @@ export async function generateTaskLabel(
 			undefined,
 			TASK_LABEL_SYSTEM_PROMPT,
 			signal,
+			{ ...options, oneshotKind: "task_label" },
 		);
 	} catch (err) {
 		logger.debug("task-label: generation failed", {

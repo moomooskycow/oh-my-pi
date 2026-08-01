@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { type AgentTelemetryConfig, PiGenAIAttr } from "@oh-my-pi/pi-agent-core";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
@@ -74,7 +75,7 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean):
 	return sessionFile;
 }
 
-function createFactory(cwd: string) {
+function createFactory(cwd: string, parentTelemetry?: AgentTelemetryConfig) {
 	const parentSession = {
 		sessionManager: {
 			getCwd: () => cwd,
@@ -86,6 +87,7 @@ function createFactory(cwd: string) {
 		authStorage: {} as never,
 		modelRegistry: { authStorage: {} } as ModelRegistry,
 		settings: Settings.isolated(),
+		parentTelemetry,
 		enableLsp: true,
 	});
 }
@@ -154,5 +156,50 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+	});
+
+	it("preserves parent telemetry and stamps the revived child identity", async () => {
+		const cwd = makeTempDir("@pi-telemetry-revive-");
+		const sessionFile = await createPersistedSession(cwd);
+		const onSpanStart = () => {};
+		const onSpanEnd = () => {};
+		const resolveAttributes = () => ({ "request.id": "revived" });
+		const costEstimator = () => undefined;
+		const parentTelemetry: AgentTelemetryConfig = {
+			attributes: { "deployment.id": "prod", [PiGenAIAttr.AgentKind]: "primary" },
+			agent: { id: "Main", name: "main" },
+			conversationId: "parent-conversation",
+			onSpanStart,
+			onSpanEnd,
+			resolveAttributes,
+			costEstimator,
+		};
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]) } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd, parentTelemetry)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		const forwarded = capturedOptions?.telemetry;
+		expect(forwarded).toBeDefined();
+		if (!forwarded) throw new Error("Expected revived telemetry");
+		expect(forwarded.attributes).toEqual({
+			"deployment.id": "prod",
+			[PiGenAIAttr.AgentKind]: "subagent",
+		});
+		expect(forwarded.onSpanStart).toBe(onSpanStart);
+		expect(forwarded.onSpanEnd).toBe(onSpanEnd);
+		expect(forwarded.resolveAttributes).toBe(resolveAttributes);
+		expect(forwarded.costEstimator).toBe(costEstimator);
+		expect(forwarded.agent).toEqual({
+			id: ref.id,
+			name: ref.displayName,
+		});
+		expect(forwarded.conversationId).toBeUndefined();
 	});
 });

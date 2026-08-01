@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type AgentTelemetryConfig,
+	type ChatUsageEvent,
 	GenAIAttr,
 	GenAIOperation,
 	PiGenAIAttr,
@@ -125,8 +126,15 @@ describe("compaction oneshot telemetry", () => {
 			.spyOn(ai, "completeSimple")
 			.mockResolvedValueOnce(makeAssistantMessage("history summary text", makeUsage(200, 90, 10, 5)))
 			.mockResolvedValueOnce(makeAssistantMessage("short summary text"));
+		const usageEvents: ChatUsageEvent[] = [];
 
-		const telemetry = resolveTelemetry(makeTelemetryConfig(), "session-1");
+		const telemetry = resolveTelemetry(
+			{
+				...makeTelemetryConfig(),
+				onChatUsage: event => void usageEvents.push(event),
+			},
+			"session-1",
+		);
 		await compact(makePreparation(), MODEL, "test-api-key", undefined, undefined, { telemetry });
 
 		expect(spy).toHaveBeenCalledTimes(2);
@@ -144,6 +152,11 @@ describe("compaction oneshot telemetry", () => {
 		expect(historySpan?.attributes[GenAIAttr.UsageOutputTokens]).toBe(90);
 		expect(historySpan?.attributes[PiGenAIAttr.AgentStepNumber]).toBe(-1);
 		expect(historySpan?.status.code).not.toBe(SpanStatusCode.ERROR);
+
+		expect(usageEvents).toHaveLength(2);
+		expect(usageEvents.find(event => event.oneshotKind === "compaction_summary")).toBeDefined();
+		expect(usageEvents.find(event => event.oneshotKind === "compaction_short_summary")).toBeDefined();
+		expect(new Set(usageEvents.map(event => event.eventId)).size).toBe(usageEvents.length);
 	});
 
 	it("emits three chat spans for split-turn preparation (history + turn-prefix + short)", async () => {

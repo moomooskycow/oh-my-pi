@@ -3,7 +3,8 @@
  */
 import * as path from "node:path";
 
-import { type Api, type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
+import { type AgentTelemetryConfig, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessage, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { StreamMarkupHealing } from "@oh-my-pi/pi-ai/utils/stream-markup-healing";
 import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
@@ -32,6 +33,13 @@ const TERMINAL_TITLE_CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/g;
 // ceiling costs nothing when thinking is genuinely suppressed and keeps the
 // `<title>` marker output reachable when it isn't (issue #4355).
 const TITLE_MAX_TOKENS = 1024;
+export type TitleGenerationKind = "session_title" | "task_label";
+
+export interface TitleGenerationOptions {
+	telemetryConfig?: AgentTelemetryConfig;
+	completeImpl?: typeof completeSimple;
+	oneshotKind?: TitleGenerationKind;
+}
 
 /** Matches the title the model wraps in `<title>...</title>`. */
 const TITLE_MARKER_GLOBAL_RE = /<title>([\s\S]*?)<\/title>|<title\s*\/>|<title>\s*$/gi;
@@ -69,6 +77,7 @@ function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel
  *   reflects the credential actually selected for this request.
  * @param customSystemPrompt Optional title-specific system prompt override
  * @param signal Session-lifecycle cancellation for background title requests
+ * @param options Optional telemetry and completion implementation overrides
  */
 export async function generateSessionTitle(
 	firstMessage: string,
@@ -79,6 +88,7 @@ export async function generateSessionTitle(
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	customSystemPrompt?: string,
 	signal?: AbortSignal,
+	options?: TitleGenerationOptions,
 ): Promise<string | null> {
 	// Defer titling for greetings / acknowledgements / empty input. The default
 	// tiny title model can't reliably decline trivial input, so this happens
@@ -101,6 +111,7 @@ export async function generateSessionTitle(
 			metadataResolver,
 			signal,
 			titleSystemPrompt,
+			options,
 		);
 	}
 
@@ -159,6 +170,7 @@ export async function generateTitleOnline(
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	signal?: AbortSignal,
 	customSystemPrompt?: string,
+	options?: TitleGenerationOptions,
 ): Promise<string | null> {
 	const model = getTitleModel(registry, settings, currentModel);
 	if (!model) {
@@ -198,8 +210,8 @@ export async function generateTitleOnline(
 		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
 		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
-
-		const response = await completeSimple(
+		const telemetry = resolveTelemetry(options?.telemetryConfig, sessionId);
+		const response = await instrumentedCompleteSimple(
 			model,
 			{
 				systemPrompt,
@@ -211,6 +223,11 @@ export async function generateTitleOnline(
 				disableReasoning: true,
 				metadata,
 				signal,
+			},
+			{
+				telemetry,
+				oneshotKind: options?.oneshotKind ?? "session_title",
+				completeImpl: options?.completeImpl,
 			},
 		);
 

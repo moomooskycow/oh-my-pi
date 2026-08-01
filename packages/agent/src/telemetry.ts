@@ -23,6 +23,8 @@
  * cheap pass-throughs.
  */
 
+import { randomUUID } from "node:crypto";
+
 import {
 	type Api,
 	type AssistantMessage,
@@ -126,6 +128,7 @@ export const enum OpenAIAttr {
 export const enum PiGenAIAttr {
 	AgentStepNumber = "pi.gen_ai.agent.step.number",
 	AgentStepCount = "pi.gen_ai.agent.step.count",
+	AgentKind = "pi.gen_ai.agent.kind",
 	RequestReasoningEffort = "pi.gen_ai.request.reasoning.effort",
 	RequestToolChoice = "pi.gen_ai.request.tool.choice",
 	RequestAvailableTools = "pi.gen_ai.request.available_tools",
@@ -187,6 +190,8 @@ export interface ChatUsageSnapshot {
 	readonly totalTokens: number;
 	readonly cachedInputTokens: number | undefined;
 	readonly cacheWriteTokens: number | undefined;
+	/** One-hour subset of {@link cacheWriteTokens}; the total remains unchanged. */
+	readonly cacheWrite1hTokens?: number;
 	readonly reasoningOutputTokens: number | undefined;
 }
 
@@ -230,16 +235,25 @@ export interface CostDelta {
  * dependency on the cost estimator path.
  */
 export interface ChatUsageEvent {
+	/** Stable UUID generated for this usage emission. */
+	readonly eventId: string;
 	readonly span: Span;
 	readonly agent: AgentIdentity | undefined;
 	readonly conversationId: string | undefined;
 	readonly stepNumber: number | undefined;
 	readonly model: string;
 	readonly provider: string | undefined;
+	/** Model-registry provider before OpenTelemetry semantic normalization. */
+	readonly modelProvider: string | undefined;
 	readonly serviceTier: ServiceTier | undefined;
 	readonly usage: ChatUsageSnapshot;
 	readonly cost: CostEstimate | undefined;
-	/** Resolved dynamic attributes for this chat span (from `resolveAttributes`). */
+	/**
+	 * Exact oneshot purpose when this usage came from an instrumented oneshot
+	 * completion.
+	 */
+	readonly oneshotKind?: string;
+	/** Resolved static and dynamic attributes for this chat span. */
 	readonly attributes: Attributes | undefined;
 	/**
 	 * Response headers captured from the upstream HTTP response, with keys
@@ -1118,6 +1132,7 @@ export async function finishChatSpan(
 		readonly serviceTier?: ServiceTier;
 		readonly responseHeaders?: Readonly<Record<string, string>>;
 		readonly baseUrl?: string;
+		readonly oneshotKind?: string;
 	},
 ): Promise<void> {
 	if (!span) return;
@@ -1134,6 +1149,7 @@ export async function finishChatSpan(
 			usage: message.usage,
 			applied: cost,
 			headers: options.responseHeaders,
+			...(options.oneshotKind === undefined ? {} : { oneshotKind: options.oneshotKind }),
 		}).catch(err => {
 			emitTelemetryWarning(telemetry, {
 				code: "on_chat_usage_failed",
@@ -1327,25 +1343,29 @@ function applyCostEstimateForUsage(
 	},
 ): AppliedCostEstimate {
 	const estimator = telemetry.config.costEstimator;
-	if (!estimator || !input.usage) return EMPTY_COST;
+	if (!input.usage) return EMPTY_COST;
 	const provider = normalizeProviderName(telemetry, input.provider);
 	if (!provider) return EMPTY_COST;
 	const usage = buildUsageSnapshot(input.usage);
 	let result: CostEstimate | undefined;
-	try {
-		result = estimator({
-			provider,
-			model: input.model,
-			serviceTier: input.serviceTier,
-			usage,
-		});
-	} catch (err) {
-		emitTelemetryWarning(telemetry, {
-			code: "cost_estimator_failed",
-			message: "costEstimator threw; omitting cost telemetry",
-			error: err,
-		});
-		return EMPTY_COST;
+	if (estimator) {
+		try {
+			result = estimator({
+				provider,
+				model: input.model,
+				serviceTier: input.serviceTier,
+				usage,
+			});
+		} catch (err) {
+			emitTelemetryWarning(telemetry, {
+				code: "cost_estimator_failed",
+				message: "costEstimator threw; omitting cost telemetry",
+				error: err,
+			});
+			return EMPTY_COST;
+		}
+	} else {
+		result = catalogCostEstimateFromUsage(input.usage);
 	}
 	if (!result) return EMPTY_COST;
 	if ("unavailable" in result) {
@@ -1370,6 +1390,17 @@ function applyCostEstimateForUsage(
 			usage,
 		});
 		return cost;
+	}
+	if (
+		!isFiniteNonNegativeUsd(result.usd) ||
+		(result.inputUsd != null && !isFiniteNonNegativeUsd(result.inputUsd)) ||
+		(result.outputUsd != null && !isFiniteNonNegativeUsd(result.outputUsd))
+	) {
+		emitTelemetryWarning(telemetry, {
+			code: "cost_estimator_failed",
+			message: "costEstimator returned invalid amounts; omitting cost telemetry",
+		});
+		return EMPTY_COST;
 	}
 	span.setAttribute(PiGenAIAttr.CostEstimatedUsd, result.usd);
 	if (result.inputUsd != null) span.setAttribute(PiGenAIAttr.CostInputUsd, result.inputUsd);
@@ -1396,15 +1427,44 @@ function applyCostEstimateForUsage(
 	return cost;
 }
 
-function buildUsageSnapshot(usage: Usage): ChatUsageSnapshot {
+function catalogCostEstimateFromUsage(usage: Usage): CostEstimate | undefined {
+	const cost = usage.cost;
+	const totalUsd = cost?.total;
+	if (!isFiniteNonNegativeUsd(totalUsd)) return undefined;
+	const inputUsd = cost?.input;
+	const cacheReadUsd = cost?.cacheRead;
+	const cacheWriteUsd = cost?.cacheWrite;
+	const outputUsd = cost?.output;
+	const combinedInputUsd =
+		isFiniteNonNegativeUsd(inputUsd) && isFiniteNonNegativeUsd(cacheReadUsd) && isFiniteNonNegativeUsd(cacheWriteUsd)
+			? inputUsd + cacheReadUsd + cacheWriteUsd
+			: undefined;
 	return {
-		inputTokens: (usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0),
+		usd: totalUsd,
+		inputUsd: isFiniteNonNegativeUsd(combinedInputUsd) ? combinedInputUsd : undefined,
+		outputUsd: isFiniteNonNegativeUsd(outputUsd) ? outputUsd : undefined,
+	};
+}
+
+function isFiniteNonNegativeUsd(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function buildUsageSnapshot(usage: Usage): ChatUsageSnapshot {
+	const cacheWriteTokens = usage.cacheWrite;
+	const cacheWrite1hTokens = usage.cttl?.ephemeral1h;
+	return {
+		inputTokens: (usage.input ?? 0) + (usage.cacheRead ?? 0) + (cacheWriteTokens ?? 0),
 		outputTokens: usage.output ?? 0,
 		totalTokens:
 			usage.totalTokens ??
-			(usage.input ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) + (usage.output ?? 0),
+			(usage.input ?? 0) + (usage.cacheRead ?? 0) + (cacheWriteTokens ?? 0) + (usage.output ?? 0),
 		cachedInputTokens: usage.cacheRead,
-		cacheWriteTokens: usage.cacheWrite,
+		cacheWriteTokens,
+		cacheWrite1hTokens:
+			cacheWrite1hTokens === undefined
+				? undefined
+				: Math.min(Math.max(cacheWrite1hTokens, 0), Math.max(cacheWriteTokens ?? 0, 0)),
 		reasoningOutputTokens: usage.reasoningTokens,
 	};
 }
@@ -1434,24 +1494,33 @@ async function emitChatUsage(
 		readonly usage: Usage | undefined;
 		readonly applied: AppliedCostEstimate;
 		readonly headers: Readonly<Record<string, string>> | undefined;
+		readonly oneshotKind?: string;
 	},
 ): Promise<void> {
 	const hook = telemetry.config.onChatUsage;
 	if (!hook || !input.usage) return;
+	const dynamicAttributes = resolveDynamicAttributes(
+		telemetry,
+		buildTelemetryAttributeContext(telemetry, "chat", { stepNumber: input.stepNumber }),
+	);
+	const attributes =
+		telemetry.config.attributes || dynamicAttributes
+			? { ...telemetry.config.attributes, ...dynamicAttributes }
+			: undefined;
 	const event: ChatUsageEvent = {
+		eventId: randomUUID(),
 		span,
 		agent: normalizedTelemetryAgent(telemetry),
 		conversationId: telemetry.conversationId,
 		stepNumber: input.stepNumber,
 		model: input.model,
 		provider: normalizeProviderName(telemetry, input.provider),
+		modelProvider: input.provider,
 		serviceTier: input.serviceTier,
 		usage: buildUsageSnapshot(input.usage),
 		cost: costEstimateFromApplied(input.applied),
-		attributes: resolveDynamicAttributes(
-			telemetry,
-			buildTelemetryAttributeContext(telemetry, "chat", { stepNumber: input.stepNumber }),
-		),
+		...(input.oneshotKind === undefined ? {} : { oneshotKind: input.oneshotKind }),
+		attributes,
 		headers: input.headers,
 	};
 	try {
@@ -1691,6 +1760,7 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 				serviceTier: options.serviceTier,
 				responseHeaders: capturedHeaders,
 				baseUrl: model.baseUrl,
+				oneshotKind,
 			});
 			return message;
 		});
