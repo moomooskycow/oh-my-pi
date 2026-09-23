@@ -21,7 +21,7 @@ bun scripts/release.ts $ARGUMENTS
 ```
 
 The script handles everything automatically:
-1. Pre-flight checks (clean working dir, on main branch)
+1. Pre-flight checks (clean working dir, on master branch)
 2. Updates all package.json versions
 3. Regenerates bun.lock
 4. Updates CHANGELOGs ([Unreleased] → [version] - date)
@@ -35,7 +35,7 @@ If CI fails, the script exits with an error. Fix the issue, then repeat until CI
 
 ```bash
 git commit -m "fix: <brief description>"
-git push origin main
+git push origin master
 git tag -f v$ARGUMENTS && git push origin v$ARGUMENTS --force
 bun scripts/release.ts watch
 ```

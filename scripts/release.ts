@@ -201,11 +201,11 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	console.log("Pre-flight checks...");
 
 	const branch = await git(["branch", "--show-current"]).text();
-	if (branch.trim() !== "main") {
-		console.error(`Error: Must be on main branch (currently on '${branch.trim()}')`);
+	if (branch.trim() !== "master") {
+		console.error(`Error: Must be on master branch (currently on '${branch.trim()}')`);
 		process.exit(1);
 	}
-	console.log("  On main branch");
+	console.log("  On master branch");
 
 	const status = await git(["status", "--porcelain"]).text();
 	if (status.trim()) {
@@ -360,7 +360,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	// push it dies with "src refspec … does not match any". We sidestep both by
 	// pushing the HEAD commit object id straight into the remote tag ref
 	// (`<sha>:refs/tags/v…`): the push has no dependency on a local tag, and the
-	// commit is reachable from main so maintenance cannot prune it. The local
+	// commit is reachable from master so maintenance cannot prune it. The local
 	// tag we still create is only for `git describe`; losing it is harmless. The
 	// default Git LFS pre-push hook uploads the branch's LFS objects as part of
 	// this same atomic push — no separate `git lfs push` is needed.
@@ -368,7 +368,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 	const tagRef = `v${version}`;
 	const sha = (await git(["rev-parse", "HEAD"]).text()).trim();
 	await git(["tag", "-f", tagRef]);
-	await git(["push", "--atomic", "origin", "refs/heads/main:refs/heads/main", `${sha}:refs/tags/${tagRef}`]);
+	await git(["push", "--atomic", "origin", "refs/heads/master:refs/heads/master", `${sha}:refs/tags/${tagRef}`]);
 	console.log();
 
 	// 9. Watch CI
@@ -386,7 +386,7 @@ async function cmdRelease(versionOrBump: string): Promise<void> {
 		console.log(`  git commit -m "chore: bump version to ${version}" -m "<what was fixed>"`);
 		console.log(`  git tag -f v${version}`);
 		console.log(
-			`  git push --atomic origin refs/heads/main:refs/heads/main "+$(git rev-parse HEAD):refs/tags/v${version}"`,
+			`  git push --atomic origin refs/heads/master:refs/heads/master "+$(git rev-parse HEAD):refs/tags/v${version}"`,
 		);
 		console.log("  bun scripts/release.ts watch");
 		process.exit(1);
